@@ -1,0 +1,21 @@
+[package]
+name = "legion"
+version = "0.1.0"
+edition = "2024"
+description = "Agent specialization through deliberate practice"
+
+[dependencies]
+tantivy = "0.22"
+rusqlite = { version = "0.31", features = ["bundled"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v7"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+directories = "5"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
