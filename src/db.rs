@@ -111,7 +111,6 @@ impl Database {
     }
 
     /// Retrieve all reflections for a repository, ordered newest first.
-    #[allow(dead_code)]
     pub fn get_reflections_by_repo(&self, repo: &str) -> Result<Vec<Reflection>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo, text, created_at FROM reflections WHERE repo = ?1 ORDER BY created_at DESC",

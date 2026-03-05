@@ -57,6 +57,31 @@ pub fn recall(
     })
 }
 
+/// Return the most recent reflections for a repo, bypassing BM25 search.
+///
+/// Useful for session-start hooks where no meaningful search context
+/// is available yet. Returns results ordered newest first.
+pub fn recall_latest(db: &Database, repo: &str, limit: usize) -> Result<RecallResult> {
+    let all = db.get_reflections_by_repo(repo)?;
+
+    let reflections: Vec<RecalledReflection> = all
+        .into_iter()
+        .take(limit)
+        .map(|r| RecalledReflection {
+            id: r.id,
+            text: r.text,
+            score: 0.0,
+            created_at: r.created_at,
+        })
+        .collect();
+
+    Ok(RecallResult {
+        reflections,
+        query: "(latest)".to_owned(),
+        repo: repo.to_owned(),
+    })
+}
+
 /// Format recall results for Claude Code hook injection.
 ///
 /// Produces concise, human-readable output. Returns an empty string

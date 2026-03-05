@@ -45,13 +45,17 @@ enum Commands {
         #[arg(long)]
         repo: String,
 
-        /// Current task context to match against
-        #[arg(long)]
+        /// Current task context to match against (ignored with --latest)
+        #[arg(long, default_value = "")]
         context: String,
 
         /// Maximum number of reflections to return
         #[arg(long, default_value = "5")]
         limit: usize,
+
+        /// Return most recent reflections instead of BM25 search
+        #[arg(long)]
+        latest: bool,
     },
 
     /// Show reflection statistics
@@ -99,12 +103,17 @@ fn main() -> error::Result<()> {
             repo,
             context,
             limit,
+            latest,
         } => {
             let base = data_dir()?;
             let database = db::Database::open(&base.join("legion.db"))?;
-            let index = search::SearchIndex::open(&base.join("index"))?;
 
-            let result = recall::recall(&database, &index, &repo, &context, limit)?;
+            let result = if latest {
+                recall::recall_latest(&database, &repo, limit)?
+            } else {
+                let index = search::SearchIndex::open(&base.join("index"))?;
+                recall::recall(&database, &index, &repo, &context, limit)?
+            };
             let output = recall::format_for_hook(&result);
             if !output.is_empty() {
                 print!("{output}");
