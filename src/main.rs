@@ -1,6 +1,8 @@
 #[allow(dead_code)]
 mod db;
 mod error;
+#[allow(dead_code)]
+mod search;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
