@@ -70,21 +70,36 @@ fn reflect_no_input_errors() {
     // clap allows the call but the binary returns an error since
     // neither --text nor --transcript is provided.
     assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("NoReflectionInput"),
+        "expected missing input error, got: {stderr}"
+    );
 }
 
 #[test]
 fn stats_after_reflections() {
     let dir = tempfile::tempdir().unwrap();
 
-    legion_cmd(dir.path())
+    let out = legion_cmd(dir.path())
         .args(["reflect", "--repo", "kelex", "--text", "first reflection"])
         .output()
         .unwrap();
-    legion_cmd(dir.path())
+    assert!(
+        out.status.success(),
+        "reflect 1 failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = legion_cmd(dir.path())
         .args(["reflect", "--repo", "kelex", "--text", "second reflection"])
         .output()
         .unwrap();
-    legion_cmd(dir.path())
+    assert!(
+        out.status.success(),
+        "reflect 2 failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = legion_cmd(dir.path())
         .args([
             "reflect",
             "--repo",
@@ -94,6 +109,11 @@ fn stats_after_reflections() {
         ])
         .output()
         .unwrap();
+    assert!(
+        out.status.success(),
+        "reflect 3 failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let output = legion_cmd(dir.path()).args(["stats"]).output().unwrap();
     assert!(output.status.success());
@@ -106,7 +126,7 @@ fn stats_after_reflections() {
 fn recall_with_no_matches() {
     let dir = tempfile::tempdir().unwrap();
 
-    legion_cmd(dir.path())
+    let out = legion_cmd(dir.path())
         .args([
             "reflect",
             "--repo",
@@ -116,6 +136,11 @@ fn recall_with_no_matches() {
         ])
         .output()
         .unwrap();
+    assert!(
+        out.status.success(),
+        "reflect failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let output = legion_cmd(dir.path())
         .args([
