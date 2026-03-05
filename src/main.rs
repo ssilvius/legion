@@ -1,3 +1,5 @@
+mod error;
+
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -51,7 +53,7 @@ enum Commands {
     },
 }
 
-fn main() {
+fn main() -> error::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
@@ -73,4 +75,6 @@ fn main() {
             println!("stats: repo={repo:?}");
         }
     }
+
+    Ok(())
 }
