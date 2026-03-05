@@ -4,6 +4,8 @@ mod recall;
 mod reflect;
 mod search;
 mod stats;
+#[cfg(test)]
+mod testutil;
 
 use std::path::PathBuf;
 
