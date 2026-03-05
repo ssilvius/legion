@@ -1,3 +1,5 @@
+#[allow(dead_code)]
+mod db;
 mod error;
 
 use clap::{Parser, Subcommand};
