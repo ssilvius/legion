@@ -22,6 +22,7 @@ pub struct Reflection {
 
 /// Aggregate statistics for a repository's reflections.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct RepoStats {
     pub repo: String,
     pub count: u64,
@@ -83,6 +84,7 @@ impl Database {
     }
 
     /// Retrieve all reflections for a repository, ordered newest first.
+    #[allow(dead_code)]
     pub fn get_reflections_by_repo(&self, repo: &str) -> Result<Vec<Reflection>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo, text, created_at FROM reflections WHERE repo = ?1 ORDER BY created_at DESC",
@@ -106,6 +108,7 @@ impl Database {
     }
 
     /// Get aggregate statistics, optionally filtered to a single repository.
+    #[allow(dead_code)]
     pub fn get_stats(&self, repo: Option<&str>) -> Result<Vec<RepoStats>> {
         let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<RepoStats> {
             Ok(RepoStats {
