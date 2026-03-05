@@ -58,7 +58,6 @@ pub fn stats(db: &Database, repo: Option<&str>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::Database;
     use tempfile::TempDir;
 
     /// Create a test database and keep TempDir alive so SQLite

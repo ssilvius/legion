@@ -79,15 +79,7 @@ pub fn format_for_hook(result: &RecallResult) -> String {
 mod tests {
     use super::*;
     use crate::reflect::reflect_from_text;
-
-    /// Create a Database and SearchIndex backed by a single temporary directory.
-    fn test_storage() -> (Database, SearchIndex, tempfile::TempDir) {
-        let dir = tempfile::tempdir().expect("failed to create tempdir");
-        let db = Database::open(&dir.path().join("test.db")).expect("failed to open database");
-        let index =
-            SearchIndex::open(&dir.path().join("index")).expect("failed to open search index");
-        (db, index, dir)
-    }
+    use crate::testutil::test_storage;
 
     #[test]
     fn recall_returns_ranked_results() {

@@ -16,8 +16,6 @@ use crate::error::{LegionError, Result};
 /// BM25 score on the text field (tokenized, stemmed).
 pub struct SearchIndex {
     index: Index,
-    #[allow(dead_code)]
-    schema: Schema,
     id_field: Field,
     repo_field: Field,
     text_field: Field,
@@ -61,7 +59,6 @@ impl SearchIndex {
 
         Ok(Self {
             index,
-            schema,
             id_field,
             repo_field,
             text_field,

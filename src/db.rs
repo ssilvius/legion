@@ -29,6 +29,18 @@ pub struct RepoStats {
     pub newest: String,
 }
 
+/// Map a database row to a Reflection struct.
+///
+/// Shared by all queries that select (id, repo, text, created_at).
+fn map_reflection_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Reflection> {
+    Ok(Reflection {
+        id: row.get(0)?,
+        repo: row.get(1)?,
+        text: row.get(2)?,
+        created_at: row.get(3)?,
+    })
+}
+
 impl Database {
     /// Open (or create) a SQLite database at the given path.
     ///
@@ -58,8 +70,8 @@ impl Database {
             );
             CREATE INDEX IF NOT EXISTS idx_reflections_repo ON reflections(repo);
             CREATE INDEX IF NOT EXISTS idx_reflections_created ON reflections(created_at);",
-        )
-        .map_err(LegionError::Database)
+        )?;
+        Ok(())
     }
 
     /// Insert a new reflection for the given repository.
@@ -90,14 +102,7 @@ impl Database {
             .conn
             .prepare("SELECT id, repo, text, created_at FROM reflections WHERE id = ?1")?;
 
-        let mut rows = stmt.query_map([id], |row| {
-            Ok(Reflection {
-                id: row.get(0)?,
-                repo: row.get(1)?,
-                text: row.get(2)?,
-                created_at: row.get(3)?,
-            })
-        })?;
+        let mut rows = stmt.query_map([id], map_reflection_row)?;
 
         match rows.next() {
             Some(row) => Ok(Some(row?)),
@@ -112,21 +117,9 @@ impl Database {
             "SELECT id, repo, text, created_at FROM reflections WHERE repo = ?1 ORDER BY created_at DESC",
         )?;
 
-        let rows = stmt.query_map([repo], |row| {
-            Ok(Reflection {
-                id: row.get(0)?,
-                repo: row.get(1)?,
-                text: row.get(2)?,
-                created_at: row.get(3)?,
-            })
-        })?;
-
-        let mut reflections = Vec::new();
-        for row in rows {
-            reflections.push(row?);
-        }
-
-        Ok(reflections)
+        let rows = stmt.query_map([repo], map_reflection_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
     }
 
     /// Get aggregate statistics, optionally filtered to a single repository.
@@ -140,32 +133,23 @@ impl Database {
             })
         };
 
-        let mut stats = Vec::new();
+        let base = "SELECT repo, COUNT(*) as count, MIN(created_at) as oldest, \
+                     MAX(created_at) as newest FROM reflections";
 
-        match repo {
-            Some(r) => {
-                let mut stmt = self.conn.prepare(
-                    "SELECT repo, COUNT(*) as count, MIN(created_at) as oldest, MAX(created_at) as newest \
-                     FROM reflections WHERE repo = ?1 GROUP BY repo",
-                )?;
-                let rows = stmt.query_map([r], map_row)?;
-                for row in rows {
-                    stats.push(row?);
-                }
-            }
-            None => {
-                let mut stmt = self.conn.prepare(
-                    "SELECT repo, COUNT(*) as count, MIN(created_at) as oldest, MAX(created_at) as newest \
-                     FROM reflections GROUP BY repo ORDER BY repo",
-                )?;
-                let rows = stmt.query_map([], map_row)?;
-                for row in rows {
-                    stats.push(row?);
-                }
-            }
-        }
+        let sql = match repo {
+            Some(_) => format!("{base} WHERE repo = ?1 GROUP BY repo"),
+            None => format!("{base} GROUP BY repo ORDER BY repo"),
+        };
 
-        Ok(stats)
+        let mut stmt = self.conn.prepare(&sql)?;
+
+        let rows = match repo {
+            Some(r) => stmt.query_map([r], map_row)?,
+            None => stmt.query_map([], map_row)?,
+        };
+
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
     }
 }
 
