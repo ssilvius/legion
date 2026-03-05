@@ -1,9 +1,7 @@
 use std::path::PathBuf;
 use thiserror::Error;
 
-// Variants will be constructed by downstream modules (db, search, reflect, recall).
 #[derive(Debug, Error)]
-#[allow(dead_code)]
 pub enum LegionError {
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),

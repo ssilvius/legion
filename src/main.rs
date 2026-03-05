@@ -61,8 +61,15 @@ enum Commands {
 }
 
 fn data_dir() -> error::Result<PathBuf> {
-    let dirs = ProjectDirs::from("", "", "legion").ok_or(error::LegionError::NoDataDir)?;
-    Ok(dirs.data_dir().to_path_buf())
+    let path = match std::env::var("LEGION_DATA_DIR") {
+        Ok(dir) => PathBuf::from(dir),
+        Err(_) => {
+            let dirs = ProjectDirs::from("", "", "legion").ok_or(error::LegionError::NoDataDir)?;
+            dirs.data_dir().to_path_buf()
+        }
+    };
+    std::fs::create_dir_all(&path)?;
+    Ok(path)
 }
 
 fn main() -> error::Result<()> {
