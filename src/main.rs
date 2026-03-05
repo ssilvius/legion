@@ -1,11 +1,13 @@
-#[allow(dead_code)]
 mod db;
 mod error;
+mod reflect;
 #[allow(dead_code)]
 mod search;
 
-use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+
+use clap::{Parser, Subcommand};
+use directories::ProjectDirs;
 
 #[derive(Parser)]
 #[command(
@@ -57,6 +59,11 @@ enum Commands {
     },
 }
 
+fn data_dir() -> error::Result<PathBuf> {
+    let dirs = ProjectDirs::from("", "", "legion").ok_or(error::LegionError::NoDataDir)?;
+    Ok(dirs.data_dir().to_path_buf())
+}
+
 fn main() -> error::Result<()> {
     let cli = Cli::parse();
 
@@ -66,7 +73,17 @@ fn main() -> error::Result<()> {
             text,
             transcript,
         } => {
-            println!("reflect: repo={repo}, text={text:?}, transcript={transcript:?}");
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+            let index = search::SearchIndex::open(&base.join("index"))?;
+
+            match (text, transcript) {
+                (Some(t), None) => reflect::reflect_from_text(&database, &index, &repo, &t)?,
+                (None, Some(path)) => {
+                    reflect::reflect_from_transcript(&database, &index, &repo, &path)?
+                }
+                _ => return Err(error::LegionError::NoReflectionInput),
+            }
         }
         Commands::Recall {
             repo,
