@@ -1,7 +1,7 @@
 mod db;
 mod error;
+mod recall;
 mod reflect;
-#[allow(dead_code)]
 mod search;
 
 use std::path::PathBuf;
@@ -90,7 +90,15 @@ fn main() -> error::Result<()> {
             context,
             limit,
         } => {
-            println!("recall: repo={repo}, context={context}, limit={limit}");
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+            let index = search::SearchIndex::open(&base.join("index"))?;
+
+            let result = recall::recall(&database, &index, &repo, &context, limit)?;
+            let output = recall::format_for_hook(&result);
+            if !output.is_empty() {
+                print!("{output}");
+            }
         }
         Commands::Stats { repo } => {
             println!("stats: repo={repo:?}");

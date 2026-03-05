@@ -83,6 +83,29 @@ impl Database {
         })
     }
 
+    /// Retrieve a single reflection by its ID.
+    ///
+    /// Returns `None` if no reflection exists with the given ID.
+    pub fn get_reflection_by_id(&self, id: &str) -> Result<Option<Reflection>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, repo, text, created_at FROM reflections WHERE id = ?1")?;
+
+        let mut rows = stmt.query_map([id], |row| {
+            Ok(Reflection {
+                id: row.get(0)?,
+                repo: row.get(1)?,
+                text: row.get(2)?,
+                created_at: row.get(3)?,
+            })
+        })?;
+
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
     /// Retrieve all reflections for a repository, ordered newest first.
     #[allow(dead_code)]
     pub fn get_reflections_by_repo(&self, repo: &str) -> Result<Vec<Reflection>> {
