@@ -3,6 +3,7 @@ mod error;
 mod reflect;
 #[allow(dead_code)]
 mod search;
+mod stats;
 
 use std::path::PathBuf;
 
@@ -93,7 +94,9 @@ fn main() -> error::Result<()> {
             println!("recall: repo={repo}, context={context}, limit={limit}");
         }
         Commands::Stats { repo } => {
-            println!("stats: repo={repo:?}");
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+            stats::stats(&database, repo.as_deref())?;
         }
     }
 

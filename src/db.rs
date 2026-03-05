@@ -22,7 +22,6 @@ pub struct Reflection {
 
 /// Aggregate statistics for a repository's reflections.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct RepoStats {
     pub repo: String,
     pub count: u64,
@@ -108,7 +107,6 @@ impl Database {
     }
 
     /// Get aggregate statistics, optionally filtered to a single repository.
-    #[allow(dead_code)]
     pub fn get_stats(&self, repo: Option<&str>) -> Result<Vec<RepoStats>> {
         let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<RepoStats> {
             Ok(RepoStats {
