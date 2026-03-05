@@ -66,5 +66,9 @@ src/
   search.rs        -- Tantivy index management
   reflect.rs       -- Reflection creation (from text or transcript)
   recall.rs        -- Query and rank reflections
+  stats.rs         -- Reflection statistics reporting
   error.rs         -- Error types
+  testutil.rs      -- Shared test helpers (#[cfg(test)] only)
+tests/
+  integration.rs   -- End-to-end binary tests
 ```
