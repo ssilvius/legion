@@ -10,7 +10,7 @@ Legion is a local Rust binary that stores and retrieves agent reflections. It's 
 legion reflect --repo <name> --text "reflection text"
 legion reflect --repo <name> --transcript /path/to/transcript.jsonl
 legion recall --repo <name> --context "what I'm working on"
-legion consult --context "problem outside your domain"
+legion consult --context "problem outside your domain" --limit <n>
 legion stats --repo <name>
 ```
 
@@ -23,7 +23,7 @@ reflections from ALL repos/agents:
 legion consult --context "discriminated unions in composite rules" --limit 3
 ```
 
-This searches across kelex, rafters, platform, and all other agent reflections
+This searches across all indexed agent reflections regardless of repo (e.g., kelex, rafters, platform)
 using BM25. Results include source repo attribution so you know which domain
 the knowledge came from. Use this when you hit something unfamiliar -- another
 agent may have already solved it.
