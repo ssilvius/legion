@@ -58,6 +58,17 @@ enum Commands {
         latest: bool,
     },
 
+    /// Search reflections across all repos for cross-agent consultation
+    Consult {
+        /// Context describing the problem to search for
+        #[arg(long)]
+        context: String,
+
+        /// Maximum number of reflections to return
+        #[arg(long, default_value = "3")]
+        limit: usize,
+    },
+
     /// Show reflection statistics
     Stats {
         /// Repository name (omit for all repos)
@@ -115,6 +126,17 @@ fn main() -> error::Result<()> {
                 recall::recall(&database, &index, &repo, &context, limit)?
             };
             let output = recall::format_for_hook(&result);
+            if !output.is_empty() {
+                print!("{output}");
+            }
+        }
+        Commands::Consult { context, limit } => {
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+            let index = search::SearchIndex::open(&base.join("index"))?;
+
+            let result = recall::consult(&database, &index, &context, limit)?;
+            let output = recall::format_for_consult(&result);
             if !output.is_empty() {
                 print!("{output}");
             }

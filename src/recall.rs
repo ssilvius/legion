@@ -85,6 +85,40 @@ pub fn recall_latest(db: &Database, repo: &str, limit: usize) -> Result<RecallRe
     })
 }
 
+/// Search reflections across all repositories for cross-agent consultation.
+///
+/// Uses `index.search_all()` (no repo filter) and joins with the database
+/// to retrieve full reflection data including the originating repo.
+/// Returns a `RecallResult` with `repo` set to "(all)".
+pub fn consult(
+    db: &Database,
+    index: &SearchIndex,
+    context: &str,
+    limit: usize,
+) -> Result<RecallResult> {
+    let search_results = index.search_all(context, limit)?;
+
+    let mut reflections = Vec::with_capacity(search_results.len());
+
+    for sr in &search_results {
+        if let Some(reflection) = db.get_reflection_by_id(&sr.id)? {
+            reflections.push(RecalledReflection {
+                id: reflection.id,
+                repo: reflection.repo,
+                text: reflection.text,
+                score: sr.score,
+                created_at: reflection.created_at,
+            });
+        }
+    }
+
+    Ok(RecallResult {
+        reflections,
+        query: context.to_owned(),
+        repo: "(all)".to_owned(),
+    })
+}
+
 /// Format recall results for Claude Code hook injection.
 ///
 /// Produces concise, human-readable output. Returns an empty string
@@ -98,6 +132,28 @@ pub fn format_for_hook(result: &RecallResult) -> String {
 
     for r in &result.reflections {
         output.push_str(&format!("- {} (score: {:.2})\n", r.text, r.score));
+    }
+
+    output
+}
+
+/// Format recall results for cross-repo consultation output.
+///
+/// Includes repository attribution per line so agents can see where
+/// each reflection originated. Returns an empty string when there
+/// are no results.
+pub fn format_for_consult(result: &RecallResult) -> String {
+    if result.reflections.is_empty() {
+        return String::new();
+    }
+
+    let mut output = String::from("[Legion] Cross-repo reflections:\n");
+
+    for r in &result.reflections {
+        output.push_str(&format!(
+            "- [{}] {} (score: {:.2})\n",
+            r.repo, r.text, r.score
+        ));
     }
 
     output
@@ -252,5 +308,85 @@ mod tests {
         };
         let output = format_for_hook(&result);
         assert!(output.is_empty() || output.contains("No relevant reflections"));
+    }
+
+    #[test]
+    fn consult_searches_across_repos() {
+        let (db, index, _dir) = test_storage();
+        reflect_from_text(&db, &index, "kelex", "Zod schema mapping rules").expect("reflect kelex");
+        reflect_from_text(&db, &index, "rafters", "token generation pipeline")
+            .expect("reflect rafters");
+        reflect_from_text(&db, &index, "platform", "Zod validation at the edge")
+            .expect("reflect platform");
+
+        let result = consult(&db, &index, "Zod", 10).expect("consult");
+        // Should match kelex and platform but not rafters
+        assert!(result.reflections.len() >= 2);
+        let repos: Vec<&str> = result.reflections.iter().map(|r| r.repo.as_str()).collect();
+        assert!(repos.contains(&"kelex"));
+        assert!(repos.contains(&"platform"));
+    }
+
+    #[test]
+    fn consult_includes_repo_attribution() {
+        let (db, index, _dir) = test_storage();
+        reflect_from_text(&db, &index, "kelex", "schema introspection logic").expect("reflect");
+
+        let result = consult(&db, &index, "schema", 5).expect("consult");
+        assert_eq!(result.reflections.len(), 1);
+        assert_eq!(result.reflections[0].repo, "kelex");
+        assert_eq!(result.repo, "(all)");
+    }
+
+    #[test]
+    fn consult_empty_context_returns_empty() {
+        let (db, index, _dir) = test_storage();
+        reflect_from_text(&db, &index, "kelex", "some reflection text").expect("reflect");
+
+        let result = consult(&db, &index, "", 5).expect("consult");
+        assert!(result.reflections.is_empty());
+    }
+
+    #[test]
+    fn format_for_consult_includes_repo_per_line() {
+        let result = RecallResult {
+            query: "schema".into(),
+            repo: "(all)".into(),
+            reflections: vec![
+                RecalledReflection {
+                    id: "id-1".into(),
+                    repo: "kelex".into(),
+                    text: "schema introspection".into(),
+                    score: 0.90,
+                    created_at: "2026-03-05T00:00:00Z".into(),
+                },
+                RecalledReflection {
+                    id: "id-2".into(),
+                    repo: "platform".into(),
+                    text: "schema validation".into(),
+                    score: 0.75,
+                    created_at: "2026-03-05T00:00:00Z".into(),
+                },
+            ],
+        };
+        let output = format_for_consult(&result);
+        assert!(output.contains("[Legion] Cross-repo reflections:"));
+        assert!(output.contains("[kelex]"));
+        assert!(output.contains("[platform]"));
+        assert!(output.contains("schema introspection"));
+        assert!(output.contains("schema validation"));
+        assert!(output.contains("0.90"));
+        assert!(output.contains("0.75"));
+    }
+
+    #[test]
+    fn format_for_consult_empty_results() {
+        let result = RecallResult {
+            query: "nothing".into(),
+            repo: "(all)".into(),
+            reflections: vec![],
+        };
+        let output = format_for_consult(&result);
+        assert!(output.is_empty());
     }
 }
