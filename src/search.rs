@@ -111,7 +111,6 @@ impl SearchIndex {
     /// Returns up to `limit` results ordered by descending relevance score.
     ///
     /// Returns an empty vec if the query string is empty or whitespace-only.
-    #[allow(dead_code)] // Called by consult command (issue #16)
     pub fn search_all(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
         self.execute_query(query, None, limit)
     }
