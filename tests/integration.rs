@@ -174,3 +174,103 @@ fn data_dir_is_created_automatically() {
     );
     assert!(nested.exists(), "data dir should have been created");
 }
+
+#[test]
+fn consult_across_repos() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Reflect into two different repos
+    let out = legion_cmd(dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            "kelex",
+            "--text",
+            "Zod schema mapping is fragile",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "reflect kelex failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            "platform",
+            "--text",
+            "Zod validation at the edge works well",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "reflect platform failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Consult across all repos
+    let output = legion_cmd(dir.path())
+        .args(["consult", "--context", "Zod", "--limit", "10"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "consult failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("[kelex]"),
+        "expected [kelex] in output, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("[platform]"),
+        "expected [platform] in output, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("Cross-repo reflections"),
+        "expected header in output, got: {stdout}"
+    );
+}
+
+#[test]
+fn consult_no_matches() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Reflect something so the DB/index exist
+    let out = legion_cmd(dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            "test",
+            "--text",
+            "rust ownership rules",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "reflect failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Consult with a term that will not match
+    let output = legion_cmd(dir.path())
+        .args(["consult", "--context", "nonexistent_term_xyz"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "consult should succeed even with no matches: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("no reflections matched"),
+        "expected no-match message on stderr, got: {stderr}"
+    );
+}
