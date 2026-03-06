@@ -29,6 +29,9 @@ legion recall --repo kelex --context "Zod schema mapping"
 # Recall most recent (bypasses search, useful for hooks)
 legion recall --repo kelex --latest --limit 3
 
+# Consult across all repos (cross-agent knowledge sharing)
+legion consult --context "discriminated unions in composite rules" --limit 3
+
 # Statistics
 legion stats
 legion stats --repo kelex
@@ -100,9 +103,10 @@ CREATE TABLE reflections (
 
 ## Phase Plan
 
-1. **Phase 1** (current): SQLite + Tantivy BM25. Store reflections, recall by text similarity.
-2. **Phase 2**: Add model2vec-rs (potion-retrieval-32M) for hybrid BM25 + cosine scoring when keyword matching hits the semantic wall.
-3. **Phase 3**: fastembed-rs with bge-small-en-v1.5 if higher quality embeddings are needed.
+1. **Phase 1** (complete): SQLite + Tantivy BM25. Store reflections, recall by text similarity.
+2. **Phase 1.5** (complete): Cross-agent consultation via `legion consult`. BM25 search across all repos.
+3. **Phase 2**: Add model2vec-rs (potion-retrieval-32M) for hybrid BM25 + cosine scoring when keyword matching hits the semantic wall.
+4. **Phase 3**: fastembed-rs with bge-small-en-v1.5 if higher quality embeddings are needed.
 
 ## Development
 
