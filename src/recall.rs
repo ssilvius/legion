@@ -1,6 +1,6 @@
 use crate::db::Database;
 use crate::error::Result;
-use crate::search::SearchIndex;
+use crate::search::{SearchIndex, SearchResult};
 
 /// A set of recalled reflections matching a query within a repo.
 #[derive(Debug, serde::Serialize)]
@@ -20,6 +20,32 @@ pub struct RecalledReflection {
     pub created_at: String,
 }
 
+/// Join search results with the database to produce full reflections.
+///
+/// Looks up each search hit in SQLite to retrieve the full reflection
+/// data (text, repo, created_at). Missing entries (index/DB desync)
+/// are skipped silently.
+fn join_search_results(
+    db: &Database,
+    search_results: &[SearchResult],
+) -> Result<Vec<RecalledReflection>> {
+    let mut reflections = Vec::with_capacity(search_results.len());
+
+    for sr in search_results {
+        if let Some(reflection) = db.get_reflection_by_id(&sr.id)? {
+            reflections.push(RecalledReflection {
+                id: reflection.id,
+                repo: reflection.repo,
+                text: reflection.text,
+                score: sr.score,
+                created_at: reflection.created_at,
+            });
+        }
+    }
+
+    Ok(reflections)
+}
+
 /// Query reflections relevant to the given context.
 ///
 /// Searches the Tantivy index filtered by `repo` and ranked by BM25,
@@ -36,21 +62,7 @@ pub fn recall(
     limit: usize,
 ) -> Result<RecallResult> {
     let search_results = index.search(repo, context, limit)?;
-
-    let mut reflections = Vec::with_capacity(search_results.len());
-
-    for sr in &search_results {
-        // Skip silently if the reflection exists in the index but not in the DB
-        if let Some(reflection) = db.get_reflection_by_id(&sr.id)? {
-            reflections.push(RecalledReflection {
-                id: reflection.id,
-                repo: reflection.repo,
-                text: reflection.text,
-                score: sr.score,
-                created_at: reflection.created_at,
-            });
-        }
-    }
+    let reflections = join_search_results(db, &search_results)?;
 
     Ok(RecallResult {
         reflections,
@@ -97,20 +109,7 @@ pub fn consult(
     limit: usize,
 ) -> Result<RecallResult> {
     let search_results = index.search_all(context, limit)?;
-
-    let mut reflections = Vec::with_capacity(search_results.len());
-
-    for sr in &search_results {
-        if let Some(reflection) = db.get_reflection_by_id(&sr.id)? {
-            reflections.push(RecalledReflection {
-                id: reflection.id,
-                repo: reflection.repo,
-                text: reflection.text,
-                score: sr.score,
-                created_at: reflection.created_at,
-            });
-        }
-    }
+    let reflections = join_search_results(db, &search_results)?;
 
     Ok(RecallResult {
         reflections,
