@@ -153,6 +153,57 @@ impl SearchIndex {
 
         Ok(results)
     }
+
+    /// Search for reflections matching a query across ALL repositories.
+    ///
+    /// Unlike `search`, this method does not filter by repo. It runs a
+    /// BM25-scored query on the `text` field across every indexed document.
+    /// Returns up to `limit` results ordered by descending relevance score.
+    ///
+    /// Returns an empty vec if the query string is empty or whitespace-only.
+    #[allow(dead_code)] // Called by consult command (issue #16)
+    pub fn search_all(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let reader = self
+            .index
+            .reader_builder()
+            .reload_policy(ReloadPolicy::Manual)
+            .try_into()
+            .map_err(|e: tantivy::TantivyError| LegionError::Search(e.to_string()))?;
+
+        let searcher = reader.searcher();
+
+        let query_parser = QueryParser::for_index(&self.index, vec![self.text_field]);
+        let text_query = query_parser
+            .parse_query(trimmed)
+            .map_err(|e| LegionError::Search(e.to_string()))?;
+
+        let top_docs = searcher
+            .search(&*text_query, &TopDocs::with_limit(limit))
+            .map_err(|e| LegionError::Search(e.to_string()))?;
+
+        let mut results: Vec<SearchResult> = Vec::with_capacity(top_docs.len());
+
+        for (score, doc_address) in top_docs {
+            let retrieved_doc: TantivyDocument = searcher
+                .doc(doc_address)
+                .map_err(|e| LegionError::Search(e.to_string()))?;
+
+            let id = retrieved_doc
+                .get_first(self.id_field)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            results.push(SearchResult { id, score });
+        }
+
+        Ok(results)
+    }
 }
 
 #[cfg(test)]
@@ -234,5 +285,67 @@ mod tests {
         let results = idx.search("test", "nesting array codegen", 5).unwrap();
         assert!(!results.is_empty());
         assert_eq!(results[0].id, "id-1");
+    }
+
+    #[test]
+    fn search_all_returns_results_from_multiple_repos() {
+        let (idx, _dir) = test_index();
+        idx.add("id-1", "kelex", "schema introspection is complex")
+            .unwrap();
+        idx.add("id-2", "rafters", "schema tokens need attention")
+            .unwrap();
+        idx.add("id-3", "platform", "schema validation with Zod")
+            .unwrap();
+        let results = idx.search_all("schema", 10).unwrap();
+        assert_eq!(results.len(), 3);
+        let ids: Vec<&str> = results.iter().map(|r| r.id.as_str()).collect();
+        assert!(ids.contains(&"id-1"));
+        assert!(ids.contains(&"id-2"));
+        assert!(ids.contains(&"id-3"));
+    }
+
+    #[test]
+    fn search_all_ranks_by_relevance() {
+        let (idx, _dir) = test_index();
+        idx.add("id-weak", "kelex", "the CLI flag parser is straightforward")
+            .unwrap();
+        idx.add(
+            "id-strong",
+            "rafters",
+            "mapping rules are fragile when adding new Zod types for mapping",
+        )
+        .unwrap();
+        let results = idx.search_all("mapping", 10).unwrap();
+        assert!(results.len() >= 1);
+        assert_eq!(results[0].id, "id-strong");
+        // BM25 scores must be in descending order
+        for pair in results.windows(2) {
+            assert!(pair[0].score >= pair[1].score);
+        }
+    }
+
+    #[test]
+    fn search_all_empty_query_returns_empty() {
+        let (idx, _dir) = test_index();
+        idx.add("id-1", "kelex", "some reflection").unwrap();
+        let results = idx.search_all("", 5).unwrap();
+        assert!(results.is_empty());
+        let results = idx.search_all("   ", 5).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn search_all_respects_limit() {
+        let (idx, _dir) = test_index();
+        for i in 0..10 {
+            idx.add(
+                &format!("id-{i}"),
+                &format!("repo-{}", i % 3),
+                &format!("reflection about testing {i}"),
+            )
+            .unwrap();
+        }
+        let results = idx.search_all("testing", 3).unwrap();
+        assert_eq!(results.len(), 3);
     }
 }
