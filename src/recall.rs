@@ -14,6 +14,7 @@ pub struct RecallResult {
 #[derive(Debug, serde::Serialize)]
 pub struct RecalledReflection {
     pub id: String,
+    pub repo: String,
     pub text: String,
     pub score: f32,
     pub created_at: String,
@@ -43,6 +44,7 @@ pub fn recall(
         if let Some(reflection) = db.get_reflection_by_id(&sr.id)? {
             reflections.push(RecalledReflection {
                 id: reflection.id,
+                repo: reflection.repo,
                 text: reflection.text,
                 score: sr.score,
                 created_at: reflection.created_at,
@@ -69,6 +71,7 @@ pub fn recall_latest(db: &Database, repo: &str, limit: usize) -> Result<RecallRe
         .take(limit)
         .map(|r| RecalledReflection {
             id: r.id,
+            repo: r.repo,
             text: r.text,
             score: 0.0,
             created_at: r.created_at,
@@ -200,6 +203,7 @@ mod tests {
             repo: "kelex".into(),
             reflections: vec![RecalledReflection {
                 id: "test-id".into(),
+                repo: "kelex".into(),
                 text: "mapping rules are fragile".into(),
                 score: 0.87,
                 created_at: "2026-03-05T00:00:00Z".into(),
@@ -219,12 +223,14 @@ mod tests {
             reflections: vec![
                 RecalledReflection {
                     id: "id-1".into(),
+                    repo: "kelex".into(),
                     text: "mapping rules are fragile".into(),
                     score: 0.87,
                     created_at: "2026-03-05T00:00:00Z".into(),
                 },
                 RecalledReflection {
                     id: "id-2".into(),
+                    repo: "kelex".into(),
                     text: "discriminated unions hide complexity".into(),
                     score: 0.62,
                     created_at: "2026-03-05T00:00:00Z".into(),
