@@ -2,7 +2,7 @@ use crate::db::Database;
 use crate::error::Result;
 use crate::search::{SearchIndex, SearchResult};
 
-/// A set of recalled reflections matching a query within a repo.
+/// A set of recalled reflections matching a query, optionally scoped to a single repo.
 #[derive(Debug, serde::Serialize)]
 pub struct RecallResult {
     pub reflections: Vec<RecalledReflection>,
@@ -24,7 +24,7 @@ pub struct RecalledReflection {
 ///
 /// Looks up each search hit in SQLite to retrieve the full reflection
 /// data (text, repo, created_at). Missing entries (index/DB desync)
-/// are skipped silently.
+/// are logged as warnings to stderr.
 fn join_search_results(
     db: &Database,
     search_results: &[SearchResult],
@@ -40,6 +40,11 @@ fn join_search_results(
                 score: sr.score,
                 created_at: reflection.created_at,
             });
+        } else {
+            eprintln!(
+                "[legion] warning: reflection {} found in index but missing from database",
+                sr.id
+            );
         }
     }
 
@@ -51,7 +56,7 @@ fn join_search_results(
 /// Searches the Tantivy index filtered by `repo` and ranked by BM25,
 /// then joins each result with the SQLite database to retrieve full
 /// reflection data (text, created_at). Missing reflections in the DB
-/// (index/DB desync) are skipped silently.
+/// (index/DB desync) are logged as warnings to stderr.
 ///
 /// Returns results ordered by descending relevance score.
 pub fn recall(

@@ -137,7 +137,9 @@ fn main() -> error::Result<()> {
 
             let result = recall::consult(&database, &index, &context, limit)?;
             let output = recall::format_for_consult(&result);
-            if !output.is_empty() {
+            if output.is_empty() {
+                eprintln!("[legion] no reflections matched context: \"{}\"", context);
+            } else {
                 print!("{output}");
             }
         }
