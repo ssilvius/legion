@@ -10,8 +10,23 @@ Legion is a local Rust binary that stores and retrieves agent reflections. It's 
 legion reflect --repo <name> --text "reflection text"
 legion reflect --repo <name> --transcript /path/to/transcript.jsonl
 legion recall --repo <name> --context "what I'm working on"
+legion consult --context "problem outside your domain"
 legion stats --repo <name>
 ```
+
+### Cross-Agent Consultation
+
+When you encounter a problem outside your domain, use `legion consult` to search
+reflections from ALL repos/agents:
+
+```bash
+legion consult --context "discriminated unions in composite rules" --limit 3
+```
+
+This searches across kelex, rafters, platform, and all other agent reflections
+using BM25. Results include source repo attribution so you know which domain
+the knowledge came from. Use this when you hit something unfamiliar -- another
+agent may have already solved it.
 
 ## Architecture
 
@@ -47,15 +62,17 @@ CREATE INDEX idx_reflections_created ON reflections(created_at);
 
 ## Phase Plan
 
-1. **Phase 1** (now): SQLite + Tantivy BM25. Store reflections, recall by text similarity.
-2. **Phase 2** (when BM25 hits semantic wall): Add model2vec-rs, hybrid BM25 + cosine scoring.
-3. **Phase 3** (if needed): fastembed-rs with bge-small-en-v1.5 for higher quality.
+1. **Phase 1** (complete): SQLite + Tantivy BM25. Store reflections, recall by text similarity.
+2. **Phase 1.5** (complete): Cross-agent consultation via `legion consult`. BM25 search across all repos.
+3. **Phase 2** (when BM25 hits semantic wall): Add model2vec-rs, hybrid BM25 + cosine scoring. Synapse agent for quality gating.
+4. **Phase 3** (if needed): fastembed-rs with bge-small-en-v1.5 for higher quality.
 
 ## Hook Integration
 
 Legion is called by Claude Code hooks:
 - `SessionStart` hook calls `legion recall` and injects context via additionalContext
-- `SessionEnd` hook calls `legion reflect` with the transcript path
+- `Stop` hook prompts the agent to reflect before closing
+- `consult` is agent-initiated (called via Bash mid-session), not hook-driven
 
 ## Project Layout
 
