@@ -12,8 +12,8 @@ use crate::error::{LegionError, Result};
 /// Full-text search index backed by Tantivy with BM25 scoring.
 ///
 /// Indexes reflection text for retrieval by keyword similarity.
-/// Documents are filtered by repo (exact match) and ranked by
-/// BM25 score on the text field (tokenized, stemmed).
+/// Documents can optionally be filtered by repo (exact match) and
+/// are ranked by BM25 score on the text field (tokenized, stemmed).
 pub struct SearchIndex {
     index: Index,
     id_field: Field,
@@ -165,13 +165,15 @@ impl SearchIndex {
                 .doc(doc_address)
                 .map_err(|e| LegionError::Search(e.to_string()))?;
 
-            let id = retrieved_doc
+            if let Some(id_str) = retrieved_doc
                 .get_first(self.id_field)
                 .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-
-            results.push(SearchResult { id, score });
+            {
+                results.push(SearchResult {
+                    id: id_str.to_string(),
+                    score,
+                });
+            }
         }
 
         Ok(results)
