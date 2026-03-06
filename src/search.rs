@@ -101,57 +101,7 @@ impl SearchIndex {
     ///
     /// Returns an empty vec if the query string is empty or whitespace-only.
     pub fn search(&self, repo: &str, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
-        let trimmed = query.trim();
-        if trimmed.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let reader = self
-            .index
-            .reader_builder()
-            .reload_policy(ReloadPolicy::Manual)
-            .try_into()
-            .map_err(|e: tantivy::TantivyError| LegionError::Search(e.to_string()))?;
-
-        let searcher = reader.searcher();
-
-        // Parse the user query against the text field (uses en_stem tokenizer)
-        let query_parser = QueryParser::for_index(&self.index, vec![self.text_field]);
-        let text_query = query_parser
-            .parse_query(trimmed)
-            .map_err(|e| LegionError::Search(e.to_string()))?;
-
-        // Build exact-match filter on repo field
-        let repo_term = Term::from_field_text(self.repo_field, repo);
-        let repo_query = TermQuery::new(repo_term, IndexRecordOption::Basic);
-
-        // Combine: must match repo AND must match text query
-        let combined = BooleanQuery::new(vec![
-            (Occur::Must, Box::new(repo_query)),
-            (Occur::Must, text_query),
-        ]);
-
-        let top_docs = searcher
-            .search(&combined, &TopDocs::with_limit(limit))
-            .map_err(|e| LegionError::Search(e.to_string()))?;
-
-        let mut results: Vec<SearchResult> = Vec::with_capacity(top_docs.len());
-
-        for (score, doc_address) in top_docs {
-            let retrieved_doc: TantivyDocument = searcher
-                .doc(doc_address)
-                .map_err(|e| LegionError::Search(e.to_string()))?;
-
-            let id = retrieved_doc
-                .get_first(self.id_field)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-
-            results.push(SearchResult { id, score });
-        }
-
-        Ok(results)
+        self.execute_query(query, Some(repo), limit)
     }
 
     /// Search for reflections matching a query across ALL repositories.
@@ -163,6 +113,17 @@ impl SearchIndex {
     /// Returns an empty vec if the query string is empty or whitespace-only.
     #[allow(dead_code)] // Called by consult command (issue #16)
     pub fn search_all(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        self.execute_query(query, None, limit)
+    }
+
+    /// Shared search implementation. When `repo` is Some, results are filtered
+    /// to that repository; when None, all repositories are searched.
+    fn execute_query(
+        &self,
+        query: &str,
+        repo: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SearchResult>> {
         let trimmed = query.trim();
         if trimmed.is_empty() {
             return Ok(Vec::new());
@@ -182,8 +143,20 @@ impl SearchIndex {
             .parse_query(trimmed)
             .map_err(|e| LegionError::Search(e.to_string()))?;
 
+        let final_query: Box<dyn tantivy::query::Query> = match repo {
+            Some(repo_name) => {
+                let repo_term = Term::from_field_text(self.repo_field, repo_name);
+                let repo_query = TermQuery::new(repo_term, IndexRecordOption::Basic);
+                Box::new(BooleanQuery::new(vec![
+                    (Occur::Must, Box::new(repo_query)),
+                    (Occur::Must, text_query),
+                ]))
+            }
+            None => text_query,
+        };
+
         let top_docs = searcher
-            .search(&*text_query, &TopDocs::with_limit(limit))
+            .search(&*final_query, &TopDocs::with_limit(limit))
             .map_err(|e| LegionError::Search(e.to_string()))?;
 
         let mut results: Vec<SearchResult> = Vec::with_capacity(top_docs.len());
