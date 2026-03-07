@@ -238,6 +238,85 @@ fn consult_across_repos() {
 }
 
 #[test]
+fn cli_compound_repo_flag() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let output = legion_cmd(dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            "platform,legion",
+            "--text",
+            "compound test reflection",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "compound reflect failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("stored reflection for platform"),
+        "expected platform confirmation, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("stored reflection for legion"),
+        "expected legion confirmation, got: {stderr}"
+    );
+
+    // Verify both repos have the reflection via recall
+    let output = legion_cmd(dir.path())
+        .args(["recall", "--repo", "platform", "--context", "compound test"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("compound test reflection"),
+        "expected reflection in platform recall, got: {stdout}"
+    );
+
+    let output = legion_cmd(dir.path())
+        .args(["recall", "--repo", "legion", "--context", "compound test"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("compound test reflection"),
+        "expected reflection in legion recall, got: {stdout}"
+    );
+}
+
+#[test]
+fn cli_single_repo_still_works() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let output = legion_cmd(dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            "platform",
+            "--text",
+            "single repo test",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "single repo reflect failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("stored reflection for platform"),
+        "expected confirmation, got: {stderr}"
+    );
+}
+
+#[test]
 fn consult_no_matches() {
     let dir = tempfile::tempdir().unwrap();
 

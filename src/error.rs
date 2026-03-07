@@ -23,6 +23,9 @@ pub enum LegionError {
 
     #[error("data directory not available")]
     NoDataDir,
+
+    #[error("one or more repos failed during compound reflect")]
+    ReflectPartialFailure,
 }
 
 pub type Result<T> = std::result::Result<T, LegionError>;
