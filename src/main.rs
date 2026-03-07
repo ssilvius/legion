@@ -26,9 +26,9 @@ struct Cli {
 enum Commands {
     /// Store a reflection from a completed session
     Reflect {
-        /// Repository name (e.g., "kelex", "rafters")
-        #[arg(long)]
-        repo: String,
+        /// Repository name(s), comma-separated (e.g., "kelex" or "platform,legion")
+        #[arg(long, value_delimiter = ',', required = true)]
+        repo: Vec<String>,
 
         /// Reflection text (mutually exclusive with --transcript)
         #[arg(long, conflicts_with = "transcript")]
@@ -102,12 +102,26 @@ fn main() -> error::Result<()> {
             let database = db::Database::open(&base.join("legion.db"))?;
             let index = search::SearchIndex::open(&base.join("index"))?;
 
-            match (text, transcript) {
-                (Some(t), None) => reflect::reflect_from_text(&database, &index, &repo, &t)?,
-                (None, Some(path)) => {
-                    reflect::reflect_from_transcript(&database, &index, &repo, &path)?
+            if text.is_none() && transcript.is_none() {
+                return Err(error::LegionError::NoReflectionInput);
+            }
+
+            let mut had_error = false;
+            for r in &repo {
+                let result = match (&text, &transcript) {
+                    (Some(t), None) => reflect::reflect_from_text(&database, &index, r, t),
+                    (None, Some(path)) => {
+                        reflect::reflect_from_transcript(&database, &index, r, path)
+                    }
+                    _ => unreachable!("validated above"),
+                };
+                if let Err(e) = result {
+                    eprintln!("[legion] error storing reflection for {r}: {e}");
+                    had_error = true;
                 }
-                _ => return Err(error::LegionError::NoReflectionInput),
+            }
+            if had_error {
+                return Err(error::LegionError::ReflectPartialFailure);
             }
         }
         Commands::Recall {

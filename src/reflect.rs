@@ -28,7 +28,7 @@ pub fn reflect_from_text(db: &Database, index: &SearchIndex, repo: &str, text: &
     let reflection = db.insert_reflection(repo, trimmed)?;
     index.add(&reflection.id, repo, trimmed)?;
 
-    println!("stored reflection for {} ({})", repo, reflection.id);
+    eprintln!("stored reflection for {} ({})", repo, reflection.id);
 
     Ok(())
 }
@@ -183,6 +183,26 @@ mod tests {
         let (db, index, _idx_dir) = test_storage();
         let err = reflect_from_transcript(&db, &index, "kelex", &transcript).unwrap_err();
         assert!(matches!(err, LegionError::NoReflectionInput));
+    }
+
+    #[test]
+    fn compound_repo_stores_in_both() {
+        let (db, index, _dir) = test_storage();
+        reflect_from_text(&db, &index, "platform", "cross-repo knowledge").unwrap();
+        reflect_from_text(&db, &index, "legion", "cross-repo knowledge").unwrap();
+
+        let platform = db.get_reflections_by_repo("platform").unwrap();
+        let legion = db.get_reflections_by_repo("legion").unwrap();
+
+        assert_eq!(platform.len(), 1);
+        assert_eq!(legion.len(), 1);
+        assert_eq!(platform[0].text, legion[0].text);
+        assert_ne!(platform[0].id, legion[0].id);
+
+        let platform_search = index.search("platform", "cross-repo", 5).unwrap();
+        let legion_search = index.search("legion", "cross-repo", 5).unwrap();
+        assert_eq!(platform_search.len(), 1);
+        assert_eq!(legion_search.len(), 1);
     }
 
     #[test]
