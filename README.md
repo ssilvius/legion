@@ -1,10 +1,8 @@
 # Legion
 
-Agent specialization through deliberate practice.
+Agent memory for one engineer's craft.
 
-Legion is a local Rust CLI that stores and retrieves agent reflections. It's the memory layer for Claude Code agents -- every session ends with a reflection, every session starts with relevant context from past work.
-
-The idea: agents that develop real expertise through accumulated experience, not static prompts. Each repo builds its own corpus of learned heuristics over time. The shape of the corpus IS the expertise.
+Legion is a local Rust CLI that stores and retrieves agent reflections. It's the memory layer for Claude Code agents: every session ends with a reflection, every session starts with relevant context from past work. Agents consult each other when they're stuck. Each repo builds its own corpus of learned heuristics over time. The shape of the corpus IS the expertise.
 
 ## Install
 
@@ -43,11 +41,13 @@ legion stats --repo kelex
 
 **Recall**: At session start, relevant reflections are retrieved and injected into the agent's context. On feature branches, BM25 searches using the branch name as context. Falls back to most recent reflections when no keyword match exists.
 
-**Isolation**: Reflections are scoped by repo name. Kelex reflections never leak into rafters queries. Each codebase builds its own expertise corpus.
+**Consult**: When an agent hits something outside its domain, it searches reflections from ALL repos. The output includes repo attribution so the agent knows which domain the knowledge came from. Pull-based: the agent asks when it's stuck.
+
+**Isolation**: Reflections are scoped by repo name. Kelex reflections never leak into rafters queries. Each codebase builds its own expertise corpus. Cross-repo access is explicit via `consult`.
 
 ## Claude Code Hooks
 
-Legion integrates via two hooks in `~/.claude/settings.json`:
+Legion integrates via three hooks in `~/.claude/settings.json`:
 
 ```json
 {
@@ -60,6 +60,17 @@ Legion integrates via two hooks in `~/.claude/settings.json`:
             "type": "command",
             "command": "~/.claude/hooks/legion-recall.sh",
             "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/legion-consult.sh",
+            "timeout": 5
           }
         ]
       }
@@ -81,12 +92,14 @@ Legion integrates via two hooks in `~/.claude/settings.json`:
 
 **SessionStart** (`legion-recall.sh`): Retrieves reflections for the current repo. Tries BM25 search with the git branch name first, falls back to `--latest` for broad recall. Returns results as `additionalContext`.
 
-**Stop** (`legion-reflect.sh`): Blocks the agent from stopping and prompts it to reflect. Uses `stop_hook_active` to prevent loops -- the agent reflects, tries to stop again, and passes through cleanly.
+**PreToolUse** (`legion-consult.sh`): Lightweight reminder on every tool call that `legion consult` is available. The agent sees it constantly but only acts when stuck. Pull, not push.
+
+**Stop** (`legion-reflect.sh`): Blocks the agent from stopping and prompts it to reflect. Uses `stop_hook_active` to prevent loops: the agent reflects, tries to stop again, and passes through cleanly.
 
 ## Architecture
 
 - **Storage**: SQLite via rusqlite with WAL mode. XDG data dir (`~/Library/Application Support/legion/` on macOS, `~/.local/share/legion/` on Linux). Override with `LEGION_DATA_DIR` env var.
-- **Search**: Tantivy BM25 with English stemming. Queries are filtered by repo (exact match) and ranked by text relevance.
+- **Search**: Tantivy BM25 with English stemming. Queries are filtered by repo (exact match) and ranked by text relevance. `consult` searches across all repos.
 - **IDs**: UUIDv7 (time-ordered, non-predictable).
 
 ### Data Model
@@ -97,16 +110,13 @@ CREATE TABLE reflections (
     repo TEXT NOT NULL,         -- repository name
     text TEXT NOT NULL,         -- the reflection
     created_at TEXT NOT NULL,   -- ISO 8601
-    embedding BLOB              -- nullable, reserved for Phase 2
+    embedding BLOB              -- nullable, reserved for hybrid search
 );
 ```
 
-## Phase Plan
+## What's Next
 
-1. **Phase 1** (complete): SQLite + Tantivy BM25. Store reflections, recall by text similarity.
-2. **Phase 1.5** (complete): Cross-agent consultation via `legion consult`. BM25 search across all repos.
-3. **Phase 2**: Add model2vec-rs (potion-retrieval-32M) for hybrid BM25 + cosine scoring when keyword matching hits the semantic wall.
-4. **Phase 3**: fastembed-rs with bge-small-en-v1.5 if higher quality embeddings are needed.
+BM25 handles keyword-dense technical reflections well. When the corpus grows large enough that keyword matching hits a semantic wall, the next step is hybrid BM25 + cosine scoring with model2vec-rs for local embeddings. Still local, still a single binary. No cloud dependency.
 
 ## Development
 
