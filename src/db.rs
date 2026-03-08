@@ -151,7 +151,6 @@ impl Database {
     }
 
     /// Retrieve all board posts (audience = "team"), ordered newest first.
-    #[allow(dead_code)]
     pub fn get_board_posts(&self) -> Result<Vec<Reflection>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo, text, created_at, audience FROM reflections WHERE audience = 'team' ORDER BY created_at DESC",
@@ -165,7 +164,6 @@ impl Database {
     /// Count team posts that are unread by the given reader repo.
     ///
     /// If the reader has no entry in board_reads, all team posts are unread.
-    #[allow(dead_code)]
     pub fn get_unread_count(&self, reader_repo: &str) -> Result<u64> {
         let mut stmt = self.conn.prepare(
             "SELECT COUNT(*) FROM reflections WHERE audience = 'team' \
@@ -185,7 +183,6 @@ impl Database {
     /// Mark all current board posts as read for the given reader repo.
     ///
     /// Upserts the board_reads row with the current timestamp.
-    #[allow(dead_code)]
     pub fn mark_board_read(&self, reader_repo: &str) -> Result<()> {
         let now = Utc::now().to_rfc3339();
 
