@@ -25,7 +25,7 @@ pub fn reflect_from_text(db: &Database, index: &SearchIndex, repo: &str, text: &
         return Err(LegionError::NoReflectionInput);
     }
 
-    let reflection = db.insert_reflection(repo, trimmed)?;
+    let reflection = db.insert_reflection(repo, trimmed, "self")?;
     index.add(&reflection.id, repo, trimmed)?;
 
     eprintln!("stored reflection for {} ({})", repo, reflection.id);

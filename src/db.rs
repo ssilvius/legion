@@ -18,6 +18,7 @@ pub struct Reflection {
     pub repo: String,
     pub text: String,
     pub created_at: String,
+    pub audience: String,
 }
 
 /// Aggregate statistics for a repository's reflections.
@@ -31,13 +32,14 @@ pub struct RepoStats {
 
 /// Map a database row to a Reflection struct.
 ///
-/// Shared by all queries that select (id, repo, text, created_at).
+/// Shared by all queries that select (id, repo, text, created_at, audience).
 fn map_reflection_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Reflection> {
     Ok(Reflection {
         id: row.get(0)?,
         repo: row.get(1)?,
         text: row.get(2)?,
         created_at: row.get(3)?,
+        audience: row.get(4)?,
     })
 }
 
@@ -58,7 +60,11 @@ impl Database {
         Ok(Self { conn })
     }
 
-    /// Create the reflections table and indexes if they do not already exist.
+    /// Create the reflections table, indexes, and supporting tables.
+    ///
+    /// Runs migrations for columns added after the initial schema (e.g.
+    /// audience). ALTER TABLE failures are caught so that running against
+    /// an already-migrated database is safe.
     fn init_schema(conn: &Connection) -> Result<()> {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS reflections (
@@ -71,19 +77,41 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_reflections_repo ON reflections(repo);
             CREATE INDEX IF NOT EXISTS idx_reflections_created ON reflections(created_at);",
         )?;
+
+        // Migration: add audience column. Catches "duplicate column name" errors
+        // so this is safe to run on databases that already have the column.
+        let add_audience = conn.execute_batch(
+            "ALTER TABLE reflections ADD COLUMN audience TEXT NOT NULL DEFAULT 'self';",
+        );
+        match add_audience {
+            Ok(()) => {}
+            Err(rusqlite::Error::SqliteFailure(_, Some(ref msg)))
+                if msg.contains("duplicate column name") => {}
+            Err(e) => return Err(LegionError::Database(e)),
+        }
+
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS board_reads (
+                reader_repo TEXT NOT NULL PRIMARY KEY,
+                last_read_at TEXT NOT NULL
+            );",
+        )?;
+
         Ok(())
     }
 
     /// Insert a new reflection for the given repository.
     ///
     /// Generates a UUIDv7 id and ISO 8601 timestamp automatically.
-    pub fn insert_reflection(&self, repo: &str, text: &str) -> Result<Reflection> {
+    /// The `audience` parameter controls visibility: "self" for private
+    /// reflections, "team" for board posts visible to all agents.
+    pub fn insert_reflection(&self, repo: &str, text: &str, audience: &str) -> Result<Reflection> {
         let id = Uuid::now_v7().to_string();
         let created_at = Utc::now().to_rfc3339();
 
         self.conn.execute(
-            "INSERT INTO reflections (id, repo, text, created_at) VALUES (?1, ?2, ?3, ?4)",
-            (&id, repo, text, &created_at),
+            "INSERT INTO reflections (id, repo, text, created_at, audience) VALUES (?1, ?2, ?3, ?4, ?5)",
+            (&id, repo, text, &created_at, audience),
         )?;
 
         Ok(Reflection {
@@ -91,6 +119,7 @@ impl Database {
             repo: repo.to_owned(),
             text: text.to_owned(),
             created_at,
+            audience: audience.to_owned(),
         })
     }
 
@@ -98,9 +127,9 @@ impl Database {
     ///
     /// Returns `None` if no reflection exists with the given ID.
     pub fn get_reflection_by_id(&self, id: &str) -> Result<Option<Reflection>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, repo, text, created_at FROM reflections WHERE id = ?1")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, repo, text, created_at, audience FROM reflections WHERE id = ?1",
+        )?;
 
         let mut rows = stmt.query_map([id], map_reflection_row)?;
 
@@ -113,12 +142,60 @@ impl Database {
     /// Retrieve all reflections for a repository, ordered newest first.
     pub fn get_reflections_by_repo(&self, repo: &str) -> Result<Vec<Reflection>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, repo, text, created_at FROM reflections WHERE repo = ?1 ORDER BY created_at DESC",
+            "SELECT id, repo, text, created_at, audience FROM reflections WHERE repo = ?1 ORDER BY created_at DESC",
         )?;
 
         let rows = stmt.query_map([repo], map_reflection_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(LegionError::Database)
+    }
+
+    /// Retrieve all board posts (audience = "team"), ordered newest first.
+    #[allow(dead_code)]
+    pub fn get_board_posts(&self) -> Result<Vec<Reflection>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, repo, text, created_at, audience FROM reflections WHERE audience = 'team' ORDER BY created_at DESC",
+        )?;
+
+        let rows = stmt.query_map([], map_reflection_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
+    /// Count team posts that are unread by the given reader repo.
+    ///
+    /// If the reader has no entry in board_reads, all team posts are unread.
+    #[allow(dead_code)]
+    pub fn get_unread_count(&self, reader_repo: &str) -> Result<u64> {
+        let mut stmt = self.conn.prepare(
+            "SELECT COUNT(*) FROM reflections WHERE audience = 'team' \
+             AND created_at > COALESCE( \
+                 (SELECT last_read_at FROM board_reads WHERE reader_repo = ?1), \
+                 '' \
+             )",
+        )?;
+
+        let count: u64 = stmt
+            .query_row([reader_repo], |row| row.get(0))
+            .map_err(LegionError::Database)?;
+
+        Ok(count)
+    }
+
+    /// Mark all current board posts as read for the given reader repo.
+    ///
+    /// Upserts the board_reads row with the current timestamp.
+    #[allow(dead_code)]
+    pub fn mark_board_read(&self, reader_repo: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+
+        self.conn.execute(
+            "INSERT INTO board_reads (reader_repo, last_read_at) VALUES (?1, ?2) \
+             ON CONFLICT(reader_repo) DO UPDATE SET last_read_at = excluded.last_read_at",
+            (reader_repo, &now),
+        )?;
+
+        Ok(())
     }
 
     /// Get aggregate statistics, optionally filtered to a single repository.
@@ -181,7 +258,7 @@ mod tests {
     fn insert_and_retrieve_reflection() {
         let db = test_db();
         let r = db
-            .insert_reflection("kelex", "mapping rules are fragile")
+            .insert_reflection("kelex", "mapping rules are fragile", "self")
             .unwrap();
         assert_eq!(r.repo, "kelex");
         assert_eq!(r.text, "mapping rules are fragile");
@@ -195,8 +272,10 @@ mod tests {
     #[test]
     fn reflections_scoped_to_repo() {
         let db = test_db();
-        db.insert_reflection("kelex", "reflection 1").unwrap();
-        db.insert_reflection("rafters", "reflection 2").unwrap();
+        db.insert_reflection("kelex", "reflection 1", "self")
+            .unwrap();
+        db.insert_reflection("rafters", "reflection 2", "self")
+            .unwrap();
 
         let kelex = db.get_reflections_by_repo("kelex").unwrap();
         assert_eq!(kelex.len(), 1);
@@ -206,9 +285,9 @@ mod tests {
     #[test]
     fn stats_returns_counts() {
         let db = test_db();
-        db.insert_reflection("kelex", "one").unwrap();
-        db.insert_reflection("kelex", "two").unwrap();
-        db.insert_reflection("rafters", "three").unwrap();
+        db.insert_reflection("kelex", "one", "self").unwrap();
+        db.insert_reflection("kelex", "two", "self").unwrap();
+        db.insert_reflection("rafters", "three", "self").unwrap();
 
         let stats = db.get_stats(None).unwrap();
         assert_eq!(stats.len(), 2);
@@ -221,7 +300,7 @@ mod tests {
     #[test]
     fn ids_are_uuidv7() {
         let db = test_db();
-        let r = db.insert_reflection("test", "text").unwrap();
+        let r = db.insert_reflection("test", "text", "self").unwrap();
         assert_eq!(r.id.len(), 36);
         // UUIDv7 has version nibble '7' at position 14
         assert_eq!(&r.id[14..15], "7");
@@ -230,7 +309,7 @@ mod tests {
     #[test]
     fn created_at_is_iso8601() {
         let db = test_db();
-        let r = db.insert_reflection("test", "text").unwrap();
+        let r = db.insert_reflection("test", "text", "self").unwrap();
         // ISO 8601 strings contain 'T' separator and '+' or end with 'Z'
         assert!(r.created_at.contains('T'));
     }
@@ -252,8 +331,100 @@ mod tests {
     #[test]
     fn stats_for_nonexistent_repo() {
         let db = test_db();
-        db.insert_reflection("kelex", "one").unwrap();
+        db.insert_reflection("kelex", "one", "self").unwrap();
         let stats = db.get_stats(Some("nonexistent")).unwrap();
         assert!(stats.is_empty());
+    }
+
+    #[test]
+    fn insert_reflection_with_audience_self() {
+        let db = test_db();
+        let r = db.insert_reflection("kelex", "test", "self").unwrap();
+        assert_eq!(r.audience, "self");
+    }
+
+    #[test]
+    fn insert_reflection_with_audience_team() {
+        let db = test_db();
+        let r = db
+            .insert_reflection("rafters", "night shift musings", "team")
+            .unwrap();
+        assert_eq!(r.audience, "team");
+    }
+
+    #[test]
+    fn get_board_posts_returns_only_team() {
+        let db = test_db();
+        db.insert_reflection("kelex", "private note", "self")
+            .unwrap();
+        db.insert_reflection("rafters", "shared insight", "team")
+            .unwrap();
+        let posts = db.get_board_posts().unwrap();
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0].audience, "team");
+    }
+
+    #[test]
+    fn unread_count_all_unread_when_no_reads() {
+        let db = test_db();
+        db.insert_reflection("rafters", "post 1", "team").unwrap();
+        db.insert_reflection("kelex", "post 2", "team").unwrap();
+        assert_eq!(db.get_unread_count("legion").unwrap(), 2);
+    }
+
+    #[test]
+    fn mark_board_read_resets_unread_count() {
+        let db = test_db();
+        db.insert_reflection("rafters", "old post", "team").unwrap();
+        db.mark_board_read("kelex").unwrap();
+        assert_eq!(db.get_unread_count("kelex").unwrap(), 0);
+    }
+
+    #[test]
+    fn existing_reflections_default_to_self() {
+        let db = test_db();
+        let r = db
+            .insert_reflection("test", "old reflection", "self")
+            .unwrap();
+        assert_eq!(r.audience, "self");
+        let posts = db.get_board_posts().unwrap();
+        assert!(posts.is_empty());
+    }
+
+    #[test]
+    fn get_board_posts_ordered_newest_first() {
+        let db = test_db();
+        db.insert_reflection("kelex", "first post", "team").unwrap();
+        db.insert_reflection("rafters", "second post", "team")
+            .unwrap();
+        let posts = db.get_board_posts().unwrap();
+        assert_eq!(posts.len(), 2);
+        // Newest first means second post should be first in results
+        assert_eq!(posts[0].text, "second post");
+        assert_eq!(posts[1].text, "first post");
+    }
+
+    #[test]
+    fn mark_board_read_is_idempotent() {
+        let db = test_db();
+        db.insert_reflection("rafters", "a post", "team").unwrap();
+        db.mark_board_read("kelex").unwrap();
+        db.mark_board_read("kelex").unwrap();
+        assert_eq!(db.get_unread_count("kelex").unwrap(), 0);
+    }
+
+    #[test]
+    fn unread_count_tracks_new_posts_after_read() {
+        let db = test_db();
+        db.insert_reflection("rafters", "old post", "team").unwrap();
+        db.mark_board_read("kelex").unwrap();
+        assert_eq!(db.get_unread_count("kelex").unwrap(), 0);
+
+        // New post after marking read should be unread
+        // Small sleep to ensure timestamp differs
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        db.insert_reflection("platform", "new post", "team")
+            .unwrap();
+        assert_eq!(db.get_unread_count("kelex").unwrap(), 1);
     }
 }
