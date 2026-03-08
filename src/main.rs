@@ -1,5 +1,6 @@
 mod db;
 mod error;
+mod init;
 mod recall;
 mod reflect;
 mod search;
@@ -67,6 +68,13 @@ enum Commands {
         /// Maximum number of reflections to return
         #[arg(long, default_value = "3")]
         limit: usize,
+    },
+
+    /// Configure Claude Code hooks for legion
+    Init {
+        /// Skip confirmation prompts
+        #[arg(long)]
+        force: bool,
     },
 
     /// Show reflection statistics
@@ -156,6 +164,9 @@ fn main() -> error::Result<()> {
             } else {
                 print!("{output}");
             }
+        }
+        Commands::Init { force } => {
+            init::init(force)?;
         }
         Commands::Stats { repo } => {
             let base = data_dir()?;
