@@ -558,9 +558,9 @@ fn boost_and_chain_roundtrip() {
         .unwrap();
     assert!(out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
-    // Extract the ID from stderr: "stored reflection for kelex (UUID)"
-    let id = stderr
-        .trim()
+    // Extract the ID from the first line of stderr: "stored reflection for kelex (UUID)"
+    let first_line = stderr.lines().next().unwrap_or("");
+    let id = first_line
         .rsplit('(')
         .next()
         .unwrap()
@@ -611,8 +611,8 @@ fn chain_with_follows() {
         .unwrap();
     assert!(out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
-    let parent_id = stderr
-        .trim()
+    let first_line = stderr.lines().next().unwrap_or("");
+    let parent_id = first_line
         .rsplit('(')
         .next()
         .unwrap()
@@ -638,8 +638,8 @@ fn chain_with_follows() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
-    let child_id = stderr
-        .trim()
+    let first_line = stderr.lines().next().unwrap_or("");
+    let child_id = first_line
         .rsplit('(')
         .next()
         .unwrap()
@@ -785,5 +785,121 @@ fn surface_empty_database() {
     assert!(
         stdout.is_empty(),
         "expected empty surface for no highlights, got: {stdout}"
+    );
+}
+
+#[test]
+fn signal_command_posts_formatted_signal() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let output = legion_cmd(dir.path())
+        .args([
+            "signal", "--repo", "kelex", "--to", "legion", "--verb", "review", "--status",
+            "approved", "--note", "ship it",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "signal failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Verify signal appears on the board
+    let output = legion_cmd(dir.path())
+        .args(["board", "--repo", "platform"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("@legion"),
+        "expected signal recipient on board, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("review"),
+        "expected signal verb on board, got: {stdout}"
+    );
+}
+
+#[test]
+fn signal_with_details() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let output = legion_cmd(dir.path())
+        .args([
+            "signal",
+            "--repo",
+            "kelex",
+            "--to",
+            "legion",
+            "--verb",
+            "review",
+            "--status",
+            "approved",
+            "--details",
+            "surface:cap-output,chain:confirmed",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "signal with details failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn board_signals_filter() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Post a signal
+    legion_cmd(dir.path())
+        .args([
+            "signal", "--repo", "kelex", "--to", "legion", "--verb", "review", "--status",
+            "approved",
+        ])
+        .output()
+        .unwrap();
+
+    // Post a musing
+    legion_cmd(dir.path())
+        .args([
+            "post",
+            "--repo",
+            "rafters",
+            "--text",
+            "deep thoughts about design patterns",
+        ])
+        .output()
+        .unwrap();
+
+    // --signals should show only the signal
+    let output = legion_cmd(dir.path())
+        .args(["board", "--repo", "platform", "--signals"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("@legion"), "expected signal, got: {stdout}");
+    assert!(
+        !stdout.contains("deep thoughts"),
+        "expected no musings in --signals, got: {stdout}"
+    );
+
+    // --musings should show only the musing
+    let output = legion_cmd(dir.path())
+        .args(["board", "--repo", "courses", "--musings"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("deep thoughts"),
+        "expected musing, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("@legion"),
+        "expected no signals in --musings, got: {stdout}"
     );
 }

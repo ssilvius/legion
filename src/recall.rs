@@ -1,8 +1,15 @@
+use std::collections::HashMap;
+
 use chrono::Utc;
 
 use crate::db::Database;
+use crate::embed::{self, EmbedModel};
 use crate::error::Result;
 use crate::search::{SearchIndex, SearchResult};
+
+/// Minimum cosine similarity for a cosine-only candidate (no BM25 match).
+/// Prevents noise from weak semantic matches when BM25 found nothing.
+const COSINE_MIN_THRESHOLD: f32 = 0.3;
 
 /// A set of recalled reflections matching a query, optionally scoped to a single repo.
 #[derive(Debug, serde::Serialize)]
@@ -128,6 +135,132 @@ pub fn recall(
         reflections,
         query: context.to_owned(),
         repo: repo.to_owned(),
+    })
+}
+
+/// Merge BM25 and cosine scores into ranked hybrid results.
+///
+/// Shared logic for `recall_hybrid` and `consult_hybrid`. Normalizes BM25
+/// scores, applies the formula `0.6 * bm25_norm + 0.4 * cosine`, then
+/// applies boost/decay via `weighted_score`. Skips cosine-only candidates
+/// below `COSINE_MIN_THRESHOLD`.
+fn merge_hybrid_scores(
+    db: &Database,
+    bm25_results: &[SearchResult],
+    embeddings: &[(String, Vec<u8>)],
+    query_embedding: &[f32],
+    limit: usize,
+) -> Result<Vec<RecalledReflection>> {
+    let mut bm25_scores: HashMap<String, f32> = HashMap::new();
+    let mut max_bm25: f32 = 0.0;
+    for sr in bm25_results {
+        bm25_scores.insert(sr.id.clone(), sr.score);
+        if sr.score > max_bm25 {
+            max_bm25 = sr.score;
+        }
+    }
+
+    let mut cosine_scores: HashMap<String, f32> = HashMap::new();
+    for (id, blob) in embeddings {
+        let emb = embed::embedding_from_bytes(blob);
+        let sim = embed::cosine_similarity(query_embedding, &emb);
+        cosine_scores.insert(id.clone(), sim);
+    }
+
+    // Collect all candidate IDs from both sources
+    let mut all_ids: Vec<String> = bm25_scores.keys().cloned().collect();
+    for id in cosine_scores.keys() {
+        if !bm25_scores.contains_key(id) {
+            all_ids.push(id.clone());
+        }
+    }
+
+    let bm25_norm_factor = if max_bm25 > 0.0 { max_bm25 } else { 1.0 };
+    let mut reflections = Vec::new();
+
+    for id in &all_ids {
+        let bm25_raw = bm25_scores.get(id).copied().unwrap_or(0.0);
+        let cosine = cosine_scores.get(id).copied().unwrap_or(0.0);
+
+        if bm25_raw == 0.0 && cosine < COSINE_MIN_THRESHOLD {
+            continue;
+        }
+
+        if let Some(reflection) = db.get_reflection_by_id(id)? {
+            let bm25_normalized = bm25_raw / bm25_norm_factor;
+            let hybrid = 0.6 * bm25_normalized + 0.4 * cosine;
+            let score = weighted_score(
+                hybrid,
+                reflection.recall_count,
+                &reflection.last_recalled_at,
+            );
+
+            reflections.push(RecalledReflection {
+                id: reflection.id,
+                repo: reflection.repo,
+                text: reflection.text,
+                score,
+                created_at: reflection.created_at,
+            });
+        } else {
+            eprintln!(
+                "[legion] warning: reflection {} found in search but missing from database",
+                id
+            );
+        }
+    }
+
+    reflections.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    reflections.truncate(limit);
+    Ok(reflections)
+}
+
+/// Hybrid recall: BM25 + cosine similarity scoring.
+///
+/// Combines BM25 text search with semantic cosine similarity for better
+/// recall on paraphrased or conceptually related queries. Uses the formula:
+/// `score = 0.6 * bm25_norm + 0.4 * cosine_sim` (then applies boost/decay).
+pub fn recall_hybrid(
+    db: &Database,
+    index: &SearchIndex,
+    embed_model: &EmbedModel,
+    repo: &str,
+    context: &str,
+    limit: usize,
+) -> Result<RecallResult> {
+    let bm25_results = index.search(repo, context, limit * 3)?;
+    let query_embedding = embed_model.encode_one(context)?;
+    let embeddings = db.get_embeddings(Some(repo))?;
+    let reflections = merge_hybrid_scores(db, &bm25_results, &embeddings, &query_embedding, limit)?;
+
+    Ok(RecallResult {
+        reflections,
+        query: context.to_owned(),
+        repo: repo.to_owned(),
+    })
+}
+
+/// Hybrid consult: BM25 + cosine similarity across all repos.
+pub fn consult_hybrid(
+    db: &Database,
+    index: &SearchIndex,
+    embed_model: &EmbedModel,
+    context: &str,
+    limit: usize,
+) -> Result<RecallResult> {
+    let bm25_results = index.search_all(context, limit * 3)?;
+    let query_embedding = embed_model.encode_one(context)?;
+    let embeddings = db.get_embeddings(None)?;
+    let reflections = merge_hybrid_scores(db, &bm25_results, &embeddings, &query_embedding, limit)?;
+
+    Ok(RecallResult {
+        reflections,
+        query: context.to_owned(),
+        repo: "(all)".to_owned(),
     })
 }
 

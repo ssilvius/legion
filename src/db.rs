@@ -214,6 +214,70 @@ impl Database {
         })
     }
 
+    /// Store an embedding BLOB for an existing reflection.
+    pub fn store_embedding(&self, id: &str, embedding_bytes: &[u8]) -> Result<bool> {
+        let rows = self.conn.execute(
+            "UPDATE reflections SET embedding = ?1 WHERE id = ?2",
+            rusqlite::params![embedding_bytes, id],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Retrieve the embedding BLOB for a reflection, if it exists.
+    #[allow(dead_code)]
+    pub fn get_embedding(&self, id: &str) -> Result<Option<Vec<u8>>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT embedding FROM reflections WHERE id = ?1")?;
+        let mut rows = stmt.query_map([id], |row| {
+            let blob: Option<Vec<u8>> = row.get(0)?;
+            Ok(blob)
+        })?;
+        match rows.next() {
+            Some(row) => Ok(row?),
+            None => Ok(None),
+        }
+    }
+
+    /// Retrieve all reflections that have embeddings, optionally filtered by repo.
+    ///
+    /// Returns (id, embedding_bytes) pairs for cosine similarity search.
+    /// Pass `None` for cross-repo search (consult), or `Some(repo)` for
+    /// repo-scoped search (recall).
+    pub fn get_embeddings(&self, repo: Option<&str>) -> Result<Vec<(String, Vec<u8>)>> {
+        let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(String, Vec<u8>)> {
+            Ok((row.get(0)?, row.get(1)?))
+        };
+
+        let base = "SELECT id, embedding FROM reflections WHERE embedding IS NOT NULL";
+        let sql = match repo {
+            Some(_) => format!("{base} AND repo = ?1"),
+            None => base.to_owned(),
+        };
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = match repo {
+            Some(r) => stmt.query_map([r], map_row)?,
+            None => stmt.query_map([], map_row)?,
+        };
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
+    /// Get all reflection IDs that are missing embeddings.
+    pub fn get_ids_without_embeddings(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, text FROM reflections WHERE embedding IS NULL ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let text: String = row.get(1)?;
+            Ok((id, text))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
     /// Increment a reflection's recall count and update last_recalled_at.
     ///
     /// Used by `legion boost` to mark a reflection as useful after being
@@ -239,10 +303,11 @@ impl Database {
         loop {
             let r = self.get_reflection_by_id(&root_id)?;
             match r {
-                Some(ref reflection) if reflection.parent_id.is_some() => {
-                    root_id = reflection.parent_id.as_ref().unwrap().clone();
-                }
-                _ => break,
+                Some(ref reflection) => match &reflection.parent_id {
+                    Some(pid) => root_id = pid.clone(),
+                    None => break,
+                },
+                None => break,
             }
         }
 

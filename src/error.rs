@@ -32,6 +32,9 @@ pub enum LegionError {
 
     #[error("home directory not available")]
     NoHomeDir,
+
+    #[error("embedding error: {0}")]
+    Embedding(String),
 }
 
 pub type Result<T> = std::result::Result<T, LegionError>;
