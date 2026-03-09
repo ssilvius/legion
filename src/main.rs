@@ -274,8 +274,16 @@ fn run_compound_command_with_meta(
 }
 
 /// Try to load the embedding model. Returns None if not available.
+///
+/// Logs a warning to stderr on failure so degraded hybrid search is visible.
 fn try_load_embed_model() -> Option<embed::EmbedModel> {
-    embed::EmbedModel::load().ok()
+    match embed::EmbedModel::load() {
+        Ok(model) => Some(model),
+        Err(e) => {
+            eprintln!("[legion] embedding model unavailable, falling back to BM25: {e}");
+            None
+        }
+    }
 }
 
 /// Compute and store embeddings for all reflections that are missing them.
@@ -467,6 +475,14 @@ fn main() -> error::Result<()> {
 
             for r in &repo {
                 board::post_from_text_with_meta(&database, &index, r, &text, &meta)?;
+            }
+
+            // Compute embeddings for new signals
+            if let Some(model) = try_load_embed_model() {
+                let n = backfill_embeddings(&database, &model)?;
+                if n > 0 {
+                    eprintln!("[legion] embedded {} signals", n);
+                }
             }
         }
         Commands::Boost { id } => {
