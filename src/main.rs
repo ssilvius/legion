@@ -1,10 +1,12 @@
 mod board;
 mod db;
+mod embed;
 mod error;
 mod init;
 mod recall;
 mod reflect;
 mod search;
+mod signal;
 mod stats;
 mod surface;
 #[cfg(test)]
@@ -132,6 +134,45 @@ enum Commands {
         id: String,
     },
 
+    /// Send a structured signal to another agent
+    Signal {
+        /// Repository name (identifies the sender)
+        #[arg(long)]
+        repo: Vec<String>,
+
+        /// Recipient agent name (or "all")
+        #[arg(long)]
+        to: String,
+
+        /// Signal verb (e.g., review, request, announce, question, blocker)
+        #[arg(long)]
+        verb: String,
+
+        /// Signal status (e.g., approved, blocked, ready)
+        #[arg(long)]
+        status: Option<String>,
+
+        /// Free-text note
+        #[arg(long)]
+        note: Option<String>,
+
+        /// Comma-separated key:value detail pairs (e.g., "surface:cap-output,chain:confirmed")
+        #[arg(long)]
+        details: Option<String>,
+
+        /// Link to a parent reflection ID to thread signals
+        #[arg(long)]
+        follows: Option<String>,
+
+        /// Domain tag for classification
+        #[arg(long)]
+        domain: Option<String>,
+
+        /// Comma-separated tags
+        #[arg(long)]
+        tags: Option<String>,
+    },
+
     /// Read the shared board or check for unread posts
     Board {
         /// Repository name (identifies who is reading)
@@ -141,6 +182,14 @@ enum Commands {
         /// Only show unread count instead of full board
         #[arg(long)]
         count: bool,
+
+        /// Show only signals (structured coordination messages)
+        #[arg(long, conflicts_with = "musings")]
+        signals: bool,
+
+        /// Show only musings (natural language posts)
+        #[arg(long, conflicts_with = "signals")]
+        musings: bool,
     },
 
     /// Surface cross-repo highlights for a session start
@@ -152,6 +201,9 @@ enum Commands {
 
     /// Rebuild the search index from the database
     Reindex,
+
+    /// Compute embeddings for all reflections that are missing them
+    Backfill,
 
     /// Show reflection statistics
     Stats {
@@ -221,6 +273,32 @@ fn run_compound_command_with_meta(
     Ok(())
 }
 
+/// Try to load the embedding model. Returns None if not available.
+fn try_load_embed_model() -> Option<embed::EmbedModel> {
+    embed::EmbedModel::load().ok()
+}
+
+/// Compute and store embeddings for all reflections that are missing them.
+fn backfill_embeddings(db: &db::Database, model: &embed::EmbedModel) -> error::Result<usize> {
+    let missing = db.get_ids_without_embeddings()?;
+    let mut count: usize = 0;
+
+    for (id, text) in &missing {
+        match model.encode_one(text) {
+            Ok(embedding) => {
+                let bytes = embed::embedding_to_bytes(&embedding);
+                db.store_embedding(id, &bytes)?;
+                count += 1;
+            }
+            Err(e) => {
+                eprintln!("[legion] warning: failed to embed {}: {}", id, e);
+            }
+        }
+    }
+
+    Ok(count)
+}
+
 fn main() -> error::Result<()> {
     let cli = Cli::parse();
 
@@ -253,6 +331,14 @@ fn main() -> error::Result<()> {
                 reflect::reflect_from_transcript_with_meta,
                 "storing reflection",
             )?;
+
+            // Compute embeddings for new reflections (silent fail if model unavailable)
+            if let Some(model) = try_load_embed_model() {
+                let n = backfill_embeddings(&database, &model)?;
+                if n > 0 {
+                    eprintln!("[legion] embedded {} reflections", n);
+                }
+            }
         }
         Commands::Recall {
             repo,
@@ -267,7 +353,13 @@ fn main() -> error::Result<()> {
                 recall::recall_latest(&database, &repo, limit)?
             } else {
                 let index = search::SearchIndex::open(&base.join("index"))?;
-                recall::recall(&database, &index, &repo, &context, limit)?
+                // Try hybrid recall if model available, fall back to BM25-only
+                match try_load_embed_model() {
+                    Some(model) => {
+                        recall::recall_hybrid(&database, &index, &model, &repo, &context, limit)?
+                    }
+                    None => recall::recall(&database, &index, &repo, &context, limit)?,
+                }
             };
             let output = recall::format_for_hook(&result);
             if !output.is_empty() {
@@ -279,7 +371,10 @@ fn main() -> error::Result<()> {
             let database = db::Database::open(&base.join("legion.db"))?;
             let index = search::SearchIndex::open(&base.join("index"))?;
 
-            let result = recall::consult(&database, &index, &context, limit)?;
+            let result = match try_load_embed_model() {
+                Some(model) => recall::consult_hybrid(&database, &index, &model, &context, limit)?,
+                None => recall::consult(&database, &index, &context, limit)?,
+            };
             let output = recall::format_for_consult(&result);
             if output.is_empty() {
                 eprintln!("[legion] no reflections matched context: \"{}\"", context);
@@ -315,6 +410,64 @@ fn main() -> error::Result<()> {
                 board::post_from_transcript_with_meta,
                 "posting",
             )?;
+
+            // Compute embeddings for new posts
+            if let Some(model) = try_load_embed_model() {
+                let n = backfill_embeddings(&database, &model)?;
+                if n > 0 {
+                    eprintln!("[legion] embedded {} posts", n);
+                }
+            }
+        }
+        Commands::Signal {
+            repo,
+            to,
+            verb,
+            status,
+            note,
+            details,
+            follows,
+            domain,
+            tags,
+        } => {
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+            let index = search::SearchIndex::open(&base.join("index"))?;
+
+            let detail_pairs: Vec<(String, String)> = details
+                .as_deref()
+                .map(|d| {
+                    d.split(',')
+                        .filter_map(|pair| {
+                            let pair = pair.trim();
+                            pair.find(':').map(|pos| {
+                                (
+                                    pair[..pos].trim().to_string(),
+                                    pair[pos + 1..].trim().to_string(),
+                                )
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let text = signal::format_signal(
+                &to,
+                &verb,
+                status.as_deref(),
+                note.as_deref(),
+                &detail_pairs,
+            );
+
+            let meta = db::ReflectionMeta {
+                domain,
+                tags,
+                parent_id: follows,
+            };
+
+            for r in &repo {
+                board::post_from_text_with_meta(&database, &index, r, &text, &meta)?;
+            }
         }
         Commands::Boost { id } => {
             let base = data_dir()?;
@@ -355,7 +508,12 @@ fn main() -> error::Result<()> {
                 }
             }
         }
-        Commands::Board { repo, count } => {
+        Commands::Board {
+            repo,
+            count,
+            signals,
+            musings,
+        } => {
             let base = data_dir()?;
             let database = db::Database::open(&base.join("legion.db"))?;
 
@@ -366,7 +524,14 @@ fn main() -> error::Result<()> {
                     println!("{output}");
                 }
             } else {
-                let posts = board::board(&database, &repo)?;
+                let filter = if signals {
+                    board::BoardFilter::SignalsOnly
+                } else if musings {
+                    board::BoardFilter::MusingsOnly
+                } else {
+                    board::BoardFilter::All
+                };
+                let posts = board::board_filtered(&database, &repo, filter)?;
                 let output = board::format_board(&posts);
                 if !output.is_empty() {
                     print!("{output}");
@@ -382,6 +547,14 @@ fn main() -> error::Result<()> {
             let count = reflections.len();
             index.rebuild(&reflections)?;
             eprintln!("[legion] reindexed {} reflections", count);
+        }
+        Commands::Backfill => {
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+
+            let model = embed::EmbedModel::load()?;
+            let count = backfill_embeddings(&database, &model)?;
+            eprintln!("[legion] embedded {} reflections", count);
         }
         Commands::Init { force } => {
             init::init(force)?;

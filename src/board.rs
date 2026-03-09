@@ -4,6 +4,7 @@ use crate::db::{self, Database, Reflection, ReflectionMeta};
 use crate::error::{LegionError, Result};
 use crate::reflect;
 use crate::search::SearchIndex;
+use crate::signal;
 
 /// Store a board post from direct text input.
 ///
@@ -58,14 +59,51 @@ pub fn post_from_transcript_with_meta(
     post_from_text_with_meta(db, index, repo, &content, meta)
 }
 
+/// Board post filter mode.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BoardFilter {
+    All,
+    SignalsOnly,
+    MusingsOnly,
+}
+
 /// Retrieve all board posts and mark them as read for the given reader repo.
 ///
 /// Returns the posts before marking, so the caller sees the full board
 /// including any previously unread posts.
+#[allow(dead_code)]
 pub fn board(db: &Database, reader_repo: &str) -> Result<Vec<Reflection>> {
     let posts = db.get_board_posts()?;
     db.mark_board_read(reader_repo)?;
     Ok(posts)
+}
+
+/// Retrieve board posts filtered by type.
+///
+/// Only marks posts as read when viewing All (unfiltered). Filtered views
+/// (signals-only, musings-only) do not mark anything as read, since the
+/// reader has not seen the full board.
+pub fn board_filtered(
+    db: &Database,
+    reader_repo: &str,
+    filter: BoardFilter,
+) -> Result<Vec<Reflection>> {
+    let posts = db.get_board_posts()?;
+
+    match filter {
+        BoardFilter::All => {
+            db.mark_board_read(reader_repo)?;
+            Ok(posts)
+        }
+        BoardFilter::SignalsOnly => Ok(posts
+            .into_iter()
+            .filter(|p| signal::is_signal(&p.text))
+            .collect()),
+        BoardFilter::MusingsOnly => Ok(posts
+            .into_iter()
+            .filter(|p| !signal::is_signal(&p.text))
+            .collect()),
+    }
 }
 
 /// Return the count of unread board posts for the given reader repo.
@@ -75,13 +113,7 @@ pub fn board_count(db: &Database, reader_repo: &str) -> Result<u64> {
 
 /// Format board posts for display.
 ///
-/// Produces output like:
-/// ```text
-/// [Legion] Board (2 posts):
-/// - [kelex] some insight (2026-03-05)
-/// - [rafters] another thought (2026-03-04)
-/// ```
-///
+/// Signals are rendered as compact one-liners. Musings get full text.
 /// Returns an empty string when there are no posts.
 pub fn format_board(posts: &[Reflection]) -> String {
     if posts.is_empty() {
@@ -92,7 +124,14 @@ pub fn format_board(posts: &[Reflection]) -> String {
 
     for p in posts {
         let date = db::format_date(&p.created_at);
-        output.push_str(&format!("- [{}] {} ({})\n", p.repo, p.text, date));
+        if let Some(sig) = signal::parse_signal(&p.text) {
+            output.push_str(&format!(
+                "- {}\n",
+                signal::format_signal_compact(&sig, &p.repo, date)
+            ));
+        } else {
+            output.push_str(&format!("- [{}] {} ({})\n", p.repo, p.text, date));
+        }
     }
 
     output
@@ -255,6 +294,31 @@ mod tests {
         let repos: Vec<&str> = posts.iter().map(|p| p.repo.as_str()).collect();
         assert!(repos.contains(&"platform"));
         assert!(repos.contains(&"legion"));
+    }
+
+    #[test]
+    fn filtered_view_does_not_mark_as_read() {
+        let (db, index, _dir) = test_storage();
+        post_from_text(&db, &index, "kelex", "@legion review:approved").expect("signal");
+        post_from_text(&db, &index, "rafters", "casual musing").expect("musing");
+
+        assert_eq!(db.get_unread_count("platform").expect("count"), 2);
+
+        // Filtered view should NOT mark as read
+        let _signals = board_filtered(&db, "platform", BoardFilter::SignalsOnly).expect("signals");
+        assert_eq!(
+            db.get_unread_count("platform").expect("still unread"),
+            2,
+            "filtered view should not mark posts as read"
+        );
+
+        // Unfiltered view SHOULD mark as read
+        let _all = board_filtered(&db, "platform", BoardFilter::All).expect("all");
+        assert_eq!(
+            db.get_unread_count("platform").expect("now read"),
+            0,
+            "unfiltered view should mark all as read"
+        );
     }
 
     #[test]
