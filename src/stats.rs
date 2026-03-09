@@ -78,8 +78,8 @@ mod tests {
     #[test]
     fn stats_single_repo() {
         let (db, _dir) = test_db();
-        db.insert_reflection("kelex", "one").unwrap();
-        db.insert_reflection("kelex", "two").unwrap();
+        db.insert_reflection("kelex", "one", "self").unwrap();
+        db.insert_reflection("kelex", "two", "self").unwrap();
 
         let repo_stats = db.get_stats(Some("kelex")).unwrap();
         assert_eq!(repo_stats.len(), 1);
@@ -92,8 +92,8 @@ mod tests {
     #[test]
     fn stats_all_repos() {
         let (db, _dir) = test_db();
-        db.insert_reflection("kelex", "one").unwrap();
-        db.insert_reflection("rafters", "two").unwrap();
+        db.insert_reflection("kelex", "one", "self").unwrap();
+        db.insert_reflection("rafters", "two", "self").unwrap();
 
         let all_stats = db.get_stats(None).unwrap();
         assert_eq!(all_stats.len(), 2);
@@ -105,7 +105,7 @@ mod tests {
     #[test]
     fn stats_nonexistent_repo_shows_empty_message() {
         let (db, _dir) = test_db();
-        db.insert_reflection("kelex", "one").unwrap();
+        db.insert_reflection("kelex", "one", "self").unwrap();
 
         // Filtering on a repo with no reflections should behave
         // the same as an empty database.
