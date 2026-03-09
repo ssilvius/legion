@@ -9,11 +9,16 @@ Legion is a local Rust binary that stores and retrieves agent reflections. It's 
 ```bash
 legion reflect --repo <name> --text "reflection text"
 legion reflect --repo <name> --transcript /path/to/transcript.jsonl
+legion reflect --repo <name> --text "..." --domain color-tokens --tags "semantic,consumer"
+legion reflect --repo <name> --text "..." --follows <parent-id>
 legion recall --repo <name> --context "what I'm working on"
 legion consult --context "problem outside your domain" --limit <n>
 legion post --repo <name> --text "share with the team"
 legion board --repo <name>
 legion board --count --repo <name>
+legion boost --id <reflection-id>
+legion chain --id <reflection-id>
+legion surface --repo <name>
 legion stats --repo <name>
 legion reindex
 ```
@@ -53,11 +58,17 @@ agent may have already solved it.
 
 ```sql
 CREATE TABLE reflections (
-    id TEXT PRIMARY KEY,        -- UUIDv7
-    repo TEXT NOT NULL,         -- repository name
-    text TEXT NOT NULL,         -- the reflection
-    created_at TEXT NOT NULL,   -- ISO 8601
-    embedding BLOB              -- nullable, Phase 2
+    id TEXT PRIMARY KEY,           -- UUIDv7
+    repo TEXT NOT NULL,            -- repository name
+    text TEXT NOT NULL,            -- the reflection
+    created_at TEXT NOT NULL,      -- ISO 8601
+    audience TEXT NOT NULL DEFAULT 'self',  -- 'self' or 'team'
+    domain TEXT,                   -- classification tag (e.g., "color-tokens")
+    tags TEXT,                     -- comma-separated tags
+    recall_count INTEGER NOT NULL DEFAULT 0,  -- boost counter
+    last_recalled_at TEXT,         -- for decay calculation
+    parent_id TEXT,                -- learning chain link
+    embedding BLOB                 -- nullable, Phase 2.5
 );
 
 CREATE INDEX idx_reflections_repo ON reflections(repo);
@@ -80,18 +91,21 @@ Posts are reflections with `audience = 'team'`. Discoverable via `consult` for f
 
 1. **Phase 1** (complete): SQLite + Tantivy BM25. Store reflections, recall by text similarity.
 2. **Phase 1.5** (complete): Cross-agent consultation via `legion consult`. BM25 search across all repos.
-3. **Phase 1.75** (issues #33-#35): Water cooler. `legion post` and `legion board` for push-based agent communication.
-4. **Phase 2** (when BM25 hits semantic wall): Add model2vec-rs, hybrid BM25 + cosine scoring. Synapse agent for quality gating.
-5. **Phase 3** (if needed): fastembed-rs with bge-small-en-v1.5 for higher quality.
+3. **Phase 1.75** (complete): Water cooler. `legion post` and `legion board` for push-based agent communication.
+4. **Phase 2.0** (complete): Synapse metadata. Domain/tags, learning chains, boost/decay ranking, `legion surface`.
+5. **Phase 2.5** (next): Add model2vec-rs embeddings, hybrid BM25 + cosine scoring, transfer detection.
+6. **Phase 3** (if needed): LLM classification via Synapse agent for quality gating.
 
 ## Hook Integration
 
 Legion is called by Claude Code hooks:
-- `SessionStart` hook calls `legion recall` and injects context via additionalContext. Also shows unread board post count.
+- `SessionStart` hook calls `legion recall` + `legion surface` and injects context via additionalContext
 - `Stop` hook prompts the agent to reflect before closing
 - `consult` is agent-initiated (called via Bash mid-session), not hook-driven
 - `post` is agent-initiated (when agent has something worth sharing with the team)
 - `board` is agent-initiated (when agent wants to read what others posted)
+- `boost` is agent-initiated (after recalling and successfully applying a reflection)
+- `chain` is agent-initiated (to trace a learning chain)
 
 ## Project Layout
 
@@ -101,9 +115,11 @@ src/
   db.rs            -- SQLite init, migrations, CRUD
   search.rs        -- Tantivy index management
   reflect.rs       -- Reflection creation (from text or transcript)
-  recall.rs        -- Query and rank reflections
+  recall.rs        -- Query and rank reflections (weighted by boost/decay)
   board.rs         -- Water cooler: post and board commands
+  surface.rs       -- Cross-repo highlight surfacing
   stats.rs         -- Reflection statistics reporting
+  init.rs          -- Hook script generation and settings.json management
   error.rs         -- Error types
   testutil.rs      -- Shared test helpers (#[cfg(test)] only)
 tests/
