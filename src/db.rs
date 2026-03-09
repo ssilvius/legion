@@ -406,6 +406,51 @@ impl Database {
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(LegionError::Database)
     }
+
+    /// Get recent board posts (within last N hours).
+    pub fn get_recent_board_posts(&self, hours: i64) -> Result<Vec<Reflection>> {
+        let cutoff = (Utc::now() - chrono::Duration::hours(hours)).to_rfc3339();
+        let mut stmt = self.conn.prepare(
+            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
+             FROM reflections WHERE audience = 'team' AND created_at > ?1 ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([&cutoff], map_reflection_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
+    /// Get high-value reflections from other repos (by recall_count).
+    ///
+    /// Returns reflections with recall_count > 0 from repos other than
+    /// the given one, ordered by recall_count descending.
+    pub fn get_high_value_cross_repo(
+        &self,
+        exclude_repo: &str,
+        limit: usize,
+    ) -> Result<Vec<Reflection>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
+             FROM reflections WHERE repo != ?1 AND recall_count > 0 ORDER BY recall_count DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![exclude_repo, limit], map_reflection_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
+    /// Get recently extended learning chains.
+    ///
+    /// Returns reflections that have a parent_id and were created within
+    /// the last N hours, indicating a chain was recently extended.
+    pub fn get_recent_chain_extensions(&self, hours: i64) -> Result<Vec<Reflection>> {
+        let cutoff = (Utc::now() - chrono::Duration::hours(hours)).to_rfc3339();
+        let mut stmt = self.conn.prepare(
+            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
+             FROM reflections WHERE parent_id IS NOT NULL AND created_at > ?1 ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([&cutoff], map_reflection_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
 }
 
 #[cfg(test)]

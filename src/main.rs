@@ -6,6 +6,7 @@ mod recall;
 mod reflect;
 mod search;
 mod stats;
+mod surface;
 #[cfg(test)]
 mod testutil;
 
@@ -140,6 +141,13 @@ enum Commands {
         /// Only show unread count instead of full board
         #[arg(long)]
         count: bool,
+    },
+
+    /// Surface cross-repo highlights for a session start
+    Surface {
+        /// Repository name
+        #[arg(long)]
+        repo: String,
     },
 
     /// Rebuild the search index from the database
@@ -377,6 +385,16 @@ fn main() -> error::Result<()> {
         }
         Commands::Init { force } => {
             init::init(force)?;
+        }
+        Commands::Surface { repo } => {
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+
+            let result = surface::surface(&database, &repo)?;
+            let output = surface::format_surface(&result, &repo);
+            if !output.is_empty() {
+                print!("{output}");
+            }
         }
         Commands::Stats { repo } => {
             let base = data_dir()?;

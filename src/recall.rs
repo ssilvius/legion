@@ -1,3 +1,5 @@
+use chrono::Utc;
+
 use crate::db::Database;
 use crate::error::Result;
 use crate::search::{SearchIndex, SearchResult};
@@ -20,10 +22,51 @@ pub struct RecalledReflection {
     pub created_at: String,
 }
 
+/// Compute a decay factor based on how recently a reflection was recalled.
+///
+/// Returns 1.0 for reflections recalled in the last 7 days, decaying to
+/// 0.5 at 30 days and 0.25 at 90 days. Never returns less than 0.1 so
+/// old wisdom remains findable. Returns 1.0 when last_recalled_at is None
+/// (never recalled -- no penalty, boost factor handles this).
+fn decay_factor(last_recalled_at: &Option<String>) -> f32 {
+    let last = match last_recalled_at {
+        Some(ts) => match ts.parse::<chrono::DateTime<Utc>>() {
+            Ok(dt) => dt,
+            Err(_) => return 1.0,
+        },
+        None => return 1.0,
+    };
+
+    let days = (Utc::now() - last).num_days().max(0) as f32;
+
+    if days <= 7.0 {
+        1.0
+    } else if days <= 30.0 {
+        // Linear interpolation from 1.0 at 7d to 0.5 at 30d
+        1.0 - 0.5 * (days - 7.0) / 23.0
+    } else if days <= 90.0 {
+        // Linear interpolation from 0.5 at 30d to 0.25 at 90d
+        0.5 - 0.25 * (days - 30.0) / 60.0
+    } else {
+        // Floor at 0.1 for very old reflections
+        (0.25 - 0.15 * ((days - 90.0) / 180.0).min(1.0)).max(0.1)
+    }
+}
+
+/// Apply weighted scoring: boost by recall_count, decay by recency.
+///
+/// Formula: bm25_score * (1.0 + 0.1 * recall_count) * decay_factor
+fn weighted_score(bm25_score: f32, recall_count: i64, last_recalled_at: &Option<String>) -> f32 {
+    let boost = 1.0 + 0.1 * recall_count as f32;
+    let decay = decay_factor(last_recalled_at);
+    bm25_score * boost * decay
+}
+
 /// Join search results with the database to produce full reflections.
 ///
 /// Looks up each search hit in SQLite to retrieve the full reflection
-/// data (text, repo, created_at). Missing entries (index/DB desync)
+/// data (text, repo, created_at). Applies weighted scoring using
+/// recall_count and decay_factor. Missing entries (index/DB desync)
 /// are logged as warnings to stderr.
 fn join_search_results(
     db: &Database,
@@ -33,11 +76,16 @@ fn join_search_results(
 
     for sr in search_results {
         if let Some(reflection) = db.get_reflection_by_id(&sr.id)? {
+            let score = weighted_score(
+                sr.score,
+                reflection.recall_count,
+                &reflection.last_recalled_at,
+            );
             reflections.push(RecalledReflection {
                 id: reflection.id,
                 repo: reflection.repo,
                 text: reflection.text,
-                score: sr.score,
+                score,
                 created_at: reflection.created_at,
             });
         } else {
@@ -47,6 +95,13 @@ fn join_search_results(
             );
         }
     }
+
+    // Re-sort by weighted score since ordering may have changed
+    reflections.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     Ok(reflections)
 }
@@ -392,5 +447,93 @@ mod tests {
         };
         let output = format_for_consult(&result);
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn decay_factor_none_returns_one() {
+        let factor = decay_factor(&None);
+        assert!((factor - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn decay_factor_recent_returns_one() {
+        let now = Utc::now().to_rfc3339();
+        let factor = decay_factor(&Some(now));
+        assert!((factor - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn decay_factor_30_days_returns_half() {
+        let thirty_days_ago = (Utc::now() - chrono::Duration::days(30)).to_rfc3339();
+        let factor = decay_factor(&Some(thirty_days_ago));
+        assert!((factor - 0.5).abs() < 0.05, "expected ~0.5, got {factor}");
+    }
+
+    #[test]
+    fn decay_factor_90_days_returns_quarter() {
+        let ninety_days_ago = (Utc::now() - chrono::Duration::days(90)).to_rfc3339();
+        let factor = decay_factor(&Some(ninety_days_ago));
+        assert!((factor - 0.25).abs() < 0.05, "expected ~0.25, got {factor}");
+    }
+
+    #[test]
+    fn decay_factor_never_below_minimum() {
+        let year_ago = (Utc::now() - chrono::Duration::days(365)).to_rfc3339();
+        let factor = decay_factor(&Some(year_ago));
+        assert!(factor >= 0.1, "expected >= 0.1, got {factor}");
+    }
+
+    #[test]
+    fn weighted_score_boost_factor() {
+        // recall_count of 5 should give 1.5x boost
+        let score = weighted_score(1.0, 5, &None);
+        assert!((score - 1.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn weighted_score_zero_recall_no_change() {
+        let score = weighted_score(0.8, 0, &None);
+        assert!((score - 0.8).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn recall_reranks_by_weighted_score() {
+        let (db, index, _dir) = test_storage();
+
+        // Create two reflections about the same topic
+        reflect_from_text(&db, &index, "kelex", "Zod schema mapping is complex")
+            .expect("reflect 1");
+        reflect_from_text(&db, &index, "kelex", "Zod type validation patterns").expect("reflect 2");
+
+        // Boost the second one
+        let all = db.get_reflections_by_repo("kelex").unwrap();
+        let second_id = &all
+            .iter()
+            .find(|r| r.text.contains("validation"))
+            .unwrap()
+            .id;
+        db.boost_reflection(second_id).unwrap();
+        db.boost_reflection(second_id).unwrap();
+        db.boost_reflection(second_id).unwrap();
+
+        let result = recall(&db, &index, "kelex", "Zod", 5).expect("recall");
+        assert!(result.reflections.len() >= 2);
+        // The boosted reflection should have a higher weighted score
+        let boosted = result
+            .reflections
+            .iter()
+            .find(|r| r.text.contains("validation"))
+            .unwrap();
+        let unboosted = result
+            .reflections
+            .iter()
+            .find(|r| r.text.contains("mapping"))
+            .unwrap();
+        assert!(
+            boosted.score >= unboosted.score,
+            "boosted ({}) should score >= unboosted ({})",
+            boosted.score,
+            unboosted.score
+        );
     }
 }

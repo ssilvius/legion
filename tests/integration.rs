@@ -731,3 +731,59 @@ fn post_with_metadata_flags() {
         "expected post on board, got: {stdout}"
     );
 }
+
+#[test]
+fn surface_shows_recent_posts() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Post to the board
+    let out = legion_cmd(dir.path())
+        .args(["post", "--repo", "rafters", "--text", "synapse insight"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    // Surface for a different repo should show the post
+    let output = legion_cmd(dir.path())
+        .args(["surface", "--repo", "kelex"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "surface failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("[Synapse]"),
+        "expected synapse header, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("synapse insight"),
+        "expected post in surface output, got: {stdout}"
+    );
+}
+
+#[test]
+fn surface_empty_database() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Need to initialize the DB first
+    let out = legion_cmd(dir.path())
+        .args(["reflect", "--repo", "test", "--text", "setup"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let output = legion_cmd(dir.path())
+        .args(["surface", "--repo", "kelex"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    // No board posts, no high-value, no chains -- should be empty
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.is_empty(),
+        "expected empty surface for no highlights, got: {stdout}"
+    );
+}

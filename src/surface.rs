@@ -1,0 +1,186 @@
+use crate::db::{self, Database, Reflection};
+use crate::error::Result;
+
+/// Result of a surface query, containing categorized highlights.
+pub struct SurfaceResult {
+    pub recent_posts: Vec<Reflection>,
+    pub high_value: Vec<Reflection>,
+    pub chain_extensions: Vec<Reflection>,
+}
+
+/// Gather cross-repo highlights for a given repo.
+///
+/// Returns:
+/// 1. Board posts from the last 24 hours
+/// 2. Top high-value reflections from other repos (by recall_count)
+/// 3. Recently extended learning chains (last 24 hours)
+pub fn surface(db: &Database, repo: &str) -> Result<SurfaceResult> {
+    let recent_posts = db.get_recent_board_posts(24)?;
+    let high_value = db.get_high_value_cross_repo(repo, 3)?;
+    let chain_extensions = db.get_recent_chain_extensions(24)?;
+
+    Ok(SurfaceResult {
+        recent_posts,
+        high_value,
+        chain_extensions,
+    })
+}
+
+/// Format surface results for display.
+///
+/// Produces output like:
+/// ```text
+/// [Synapse] For kelex:
+/// - [rafters] posted 2h ago: "insight" (domain: color-tokens)
+/// - [courses] high-value: "pattern" (recalled 7x)
+/// - Chain extended: kelex/color-tokens (latest: "refinement")
+/// ```
+///
+/// Returns an empty string when there is nothing to surface.
+pub fn format_surface(result: &SurfaceResult, repo: &str) -> String {
+    if result.recent_posts.is_empty()
+        && result.high_value.is_empty()
+        && result.chain_extensions.is_empty()
+    {
+        return String::new();
+    }
+
+    let mut output = format!("[Synapse] For {}:\n", repo);
+
+    for p in &result.recent_posts {
+        let date = db::format_date(&p.created_at);
+        let domain_tag = p
+            .domain
+            .as_deref()
+            .map(|d| format!(" (domain: {})", d))
+            .unwrap_or_default();
+        output.push_str(&format!(
+            "- [{}] posted {}: \"{}\"{}\n",
+            p.repo, date, p.text, domain_tag
+        ));
+    }
+
+    for r in &result.high_value {
+        let domain_tag = r
+            .domain
+            .as_deref()
+            .map(|d| format!(" [{}]", d))
+            .unwrap_or_default();
+        output.push_str(&format!(
+            "- [{}] high-value{}: \"{}\" (recalled {}x)\n",
+            r.repo, domain_tag, r.text, r.recall_count
+        ));
+    }
+
+    for c in &result.chain_extensions {
+        let domain_tag = c
+            .domain
+            .as_deref()
+            .map(|d| format!("/{}", d))
+            .unwrap_or_default();
+        let truncated: String = c.text.chars().take(60).collect();
+        let ellipsis = if c.text.len() > 60 { "..." } else { "" };
+        output.push_str(&format!(
+            "- Chain extended: {}{} (latest: \"{}{}\")\n",
+            c.repo, domain_tag, truncated, ellipsis
+        ));
+    }
+
+    output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::ReflectionMeta;
+    use crate::testutil::test_storage;
+
+    #[test]
+    fn surface_empty_database() {
+        let (db, _index, _dir) = test_storage();
+        let result = surface(&db, "kelex").unwrap();
+        assert!(result.recent_posts.is_empty());
+        assert!(result.high_value.is_empty());
+        assert!(result.chain_extensions.is_empty());
+    }
+
+    #[test]
+    fn surface_shows_recent_board_posts() {
+        let (db, _index, _dir) = test_storage();
+        db.insert_reflection("rafters", "fresh insight", "team")
+            .unwrap();
+
+        let result = surface(&db, "kelex").unwrap();
+        assert_eq!(result.recent_posts.len(), 1);
+        assert_eq!(result.recent_posts[0].text, "fresh insight");
+    }
+
+    #[test]
+    fn surface_shows_high_value_cross_repo() {
+        let (db, _index, _dir) = test_storage();
+        let r = db
+            .insert_reflection("rafters", "valuable pattern", "self")
+            .unwrap();
+        db.boost_reflection(&r.id).unwrap();
+        db.boost_reflection(&r.id).unwrap();
+
+        let result = surface(&db, "kelex").unwrap();
+        assert_eq!(result.high_value.len(), 1);
+        assert_eq!(result.high_value[0].text, "valuable pattern");
+        assert_eq!(result.high_value[0].recall_count, 2);
+    }
+
+    #[test]
+    fn surface_excludes_own_repo_from_high_value() {
+        let (db, _index, _dir) = test_storage();
+        let r = db
+            .insert_reflection("kelex", "own valuable pattern", "self")
+            .unwrap();
+        db.boost_reflection(&r.id).unwrap();
+
+        let result = surface(&db, "kelex").unwrap();
+        assert!(result.high_value.is_empty());
+    }
+
+    #[test]
+    fn surface_shows_chain_extensions() {
+        let (db, _index, _dir) = test_storage();
+        let parent = db
+            .insert_reflection("kelex", "root insight", "self")
+            .unwrap();
+        let meta = ReflectionMeta {
+            parent_id: Some(parent.id.clone()),
+            ..Default::default()
+        };
+        db.insert_reflection_with_meta("kelex", "builds on root", "self", &meta)
+            .unwrap();
+
+        let result = surface(&db, "kelex").unwrap();
+        assert_eq!(result.chain_extensions.len(), 1);
+        assert_eq!(result.chain_extensions[0].text, "builds on root");
+    }
+
+    #[test]
+    fn format_surface_empty_returns_empty() {
+        let result = SurfaceResult {
+            recent_posts: vec![],
+            high_value: vec![],
+            chain_extensions: vec![],
+        };
+        let output = format_surface(&result, "kelex");
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn format_surface_includes_header() {
+        let (db, _index, _dir) = test_storage();
+        db.insert_reflection("rafters", "test post", "team")
+            .unwrap();
+
+        let result = surface(&db, "kelex").unwrap();
+        let output = format_surface(&result, "kelex");
+        assert!(output.contains("[Synapse] For kelex:"));
+        assert!(output.contains("[rafters]"));
+        assert!(output.contains("test post"));
+    }
+}
