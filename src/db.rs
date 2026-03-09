@@ -303,10 +303,11 @@ impl Database {
         loop {
             let r = self.get_reflection_by_id(&root_id)?;
             match r {
-                Some(ref reflection) if reflection.parent_id.is_some() => {
-                    root_id = reflection.parent_id.as_ref().unwrap().clone();
-                }
-                _ => break,
+                Some(ref reflection) => match &reflection.parent_id {
+                    Some(pid) => root_id = pid.clone(),
+                    None => break,
+                },
+                None => break,
             }
         }
 

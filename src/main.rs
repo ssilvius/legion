@@ -295,8 +295,9 @@ fn backfill_embeddings(db: &db::Database, model: &embed::EmbedModel) -> error::R
         match model.encode_one(text) {
             Ok(embedding) => {
                 let bytes = embed::embedding_to_bytes(&embedding);
-                db.store_embedding(id, &bytes)?;
-                count += 1;
+                if db.store_embedding(id, &bytes)? {
+                    count += 1;
+                }
             }
             Err(e) => {
                 eprintln!("[legion] warning: failed to embed {}: {}", id, e);

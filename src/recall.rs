@@ -202,6 +202,11 @@ fn merge_hybrid_scores(
                 score,
                 created_at: reflection.created_at,
             });
+        } else {
+            eprintln!(
+                "[legion] warning: reflection {} found in search but missing from database",
+                id
+            );
         }
     }
 
