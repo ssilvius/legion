@@ -79,13 +79,13 @@ pub fn recall(
 /// Return the most recent reflections for a repo, bypassing BM25 search.
 ///
 /// Useful for session-start hooks where no meaningful search context
-/// is available yet. Returns results ordered newest first.
+/// is available yet. Returns results ordered newest first. Uses SQL
+/// LIMIT for efficiency instead of fetching all and truncating.
 pub fn recall_latest(db: &Database, repo: &str, limit: usize) -> Result<RecallResult> {
-    let all = db.get_reflections_by_repo(repo)?;
+    let latest = db.get_latest_reflections(repo, limit)?;
 
-    let reflections: Vec<RecalledReflection> = all
+    let reflections: Vec<RecalledReflection> = latest
         .into_iter()
-        .take(limit)
         .map(|r| RecalledReflection {
             id: r.id,
             repo: r.repo,

@@ -1,7 +1,8 @@
 use std::path::Path;
 
-use crate::db::{Database, Reflection};
+use crate::db::{self, Database, Reflection};
 use crate::error::{LegionError, Result};
+use crate::reflect;
 use crate::search::SearchIndex;
 
 /// Store a board post from direct text input.
@@ -24,50 +25,16 @@ pub fn post_from_text(db: &Database, index: &SearchIndex, repo: &str, text: &str
 
 /// Extract and store a board post from a transcript JSONL file.
 ///
-/// Reads the file and uses the last assistant message as the post text.
-/// Sets audience to "team" for board visibility.
+/// Uses `reflect::extract_last_assistant_message` to get the last assistant
+/// message, then stores it as a board post via `post_from_text`.
 pub fn post_from_transcript(
     db: &Database,
     index: &SearchIndex,
     repo: &str,
     transcript_path: &Path,
 ) -> Result<()> {
-    if !transcript_path.exists() {
-        return Err(LegionError::TranscriptNotFound(
-            transcript_path.to_path_buf(),
-        ));
-    }
-
-    let file = std::fs::File::open(transcript_path)?;
-    let reader = std::io::BufReader::new(file);
-
-    let mut last_assistant_content: Option<String> = None;
-
-    use std::io::BufRead;
-    for line in reader.lines() {
-        let line = line?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        #[derive(serde::Deserialize)]
-        struct TranscriptLine {
-            role: String,
-            content: String,
-        }
-
-        if let Ok(entry) = serde_json::from_str::<TranscriptLine>(trimmed)
-            && entry.role == "assistant"
-        {
-            last_assistant_content = Some(entry.content);
-        }
-    }
-
-    match last_assistant_content {
-        Some(content) => post_from_text(db, index, repo, &content),
-        None => Err(LegionError::NoReflectionInput),
-    }
+    let content = reflect::extract_last_assistant_message(transcript_path)?;
+    post_from_text(db, index, repo, &content)
 }
 
 /// Retrieve all board posts and mark them as read for the given reader repo.
@@ -103,7 +70,7 @@ pub fn format_board(posts: &[Reflection]) -> String {
     let mut output = format!("[Legion] Board ({} posts):\n", posts.len());
 
     for p in posts {
-        let date = format_date(&p.created_at);
+        let date = db::format_date(&p.created_at);
         output.push_str(&format!("- [{}] {} ({})\n", p.repo, p.text, date));
     }
 
@@ -120,14 +87,6 @@ pub fn format_board_count(count: u64) -> String {
     }
 
     format!("{} unread posts on the board", count)
-}
-
-/// Format an ISO 8601 timestamp to a date-only string (YYYY-MM-DD).
-fn format_date(iso_timestamp: &str) -> String {
-    match iso_timestamp.split_once('T') {
-        Some((date, _)) => date.to_owned(),
-        None => iso_timestamp.to_owned(),
-    }
 }
 
 #[cfg(test)]
