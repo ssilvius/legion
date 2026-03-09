@@ -317,6 +317,116 @@ fn cli_single_repo_still_works() {
 }
 
 #[test]
+fn post_and_board_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Post a message
+    let out = legion_cmd(dir.path())
+        .args([
+            "post",
+            "--repo",
+            "kelex",
+            "--text",
+            "shared insight about schema parsing",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "post failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("posted to board for kelex"),
+        "expected post confirmation, got: {stderr}"
+    );
+
+    // Read the board from a different repo
+    let output = legion_cmd(dir.path())
+        .args(["board", "--repo", "rafters"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "board failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("[kelex]"),
+        "expected repo attribution, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("shared insight about schema parsing"),
+        "expected post text, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("[Legion] Board"),
+        "expected board header, got: {stdout}"
+    );
+}
+
+#[test]
+fn board_count_output() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Post two messages
+    let out = legion_cmd(dir.path())
+        .args(["post", "--repo", "kelex", "--text", "first shared thought"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "post",
+            "--repo",
+            "rafters",
+            "--text",
+            "second shared thought",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    // Check count from a reader that has not read the board
+    let output = legion_cmd(dir.path())
+        .args(["board", "--repo", "platform", "--count"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "board count failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("2 unread posts on the board"),
+        "expected unread count, got: {stdout}"
+    );
+
+    // Read the board to mark as read
+    let out = legion_cmd(dir.path())
+        .args(["board", "--repo", "platform"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    // Count should now be zero (no output)
+    let output = legion_cmd(dir.path())
+        .args(["board", "--repo", "platform", "--count"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.is_empty(),
+        "expected no output for zero unread, got: {stdout}"
+    );
+}
+
+#[test]
 fn consult_no_matches() {
     let dir = tempfile::tempdir().unwrap();
 

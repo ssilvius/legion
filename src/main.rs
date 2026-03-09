@@ -1,3 +1,4 @@
+mod board;
 mod db;
 mod error;
 mod init;
@@ -75,6 +76,32 @@ enum Commands {
         /// Skip confirmation prompts
         #[arg(long)]
         force: bool,
+    },
+
+    /// Post a message to the shared board for other agents
+    Post {
+        /// Repository name(s), comma-separated (e.g., "kelex" or "platform,legion")
+        #[arg(long, value_delimiter = ',', required = true)]
+        repo: Vec<String>,
+
+        /// Post text (mutually exclusive with --transcript)
+        #[arg(long, conflicts_with = "transcript")]
+        text: Option<String>,
+
+        /// Path to session transcript JSONL file
+        #[arg(long, conflicts_with = "text")]
+        transcript: Option<PathBuf>,
+    },
+
+    /// Read the shared board or check for unread posts
+    Board {
+        /// Repository name (identifies who is reading)
+        #[arg(long)]
+        repo: String,
+
+        /// Only show unread count instead of full board
+        #[arg(long)]
+        count: bool,
     },
 
     /// Show reflection statistics
@@ -163,6 +190,53 @@ fn main() -> error::Result<()> {
                 eprintln!("[legion] no reflections matched context: \"{}\"", context);
             } else {
                 print!("{output}");
+            }
+        }
+        Commands::Post {
+            repo,
+            text,
+            transcript,
+        } => {
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+            let index = search::SearchIndex::open(&base.join("index"))?;
+
+            if text.is_none() && transcript.is_none() {
+                return Err(error::LegionError::NoReflectionInput);
+            }
+
+            let mut had_error = false;
+            for r in &repo {
+                let result = match (&text, &transcript) {
+                    (Some(t), None) => board::post_from_text(&database, &index, r, t),
+                    (None, Some(path)) => board::post_from_transcript(&database, &index, r, path),
+                    _ => unreachable!("validated above"),
+                };
+                if let Err(e) = result {
+                    eprintln!("[legion] error posting for {r}: {e}");
+                    had_error = true;
+                }
+            }
+            if had_error {
+                return Err(error::LegionError::ReflectPartialFailure);
+            }
+        }
+        Commands::Board { repo, count } => {
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+
+            if count {
+                let n = board::board_count(&database, &repo)?;
+                let output = board::format_board_count(n);
+                if !output.is_empty() {
+                    println!("{output}");
+                }
+            } else {
+                let posts = board::board(&database, &repo)?;
+                let output = board::format_board(&posts);
+                if !output.is_empty() {
+                    print!("{output}");
+                }
             }
         }
         Commands::Init { force } => {
