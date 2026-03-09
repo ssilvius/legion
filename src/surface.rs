@@ -1,6 +1,18 @@
 use crate::db::{self, Database, Reflection};
 use crate::error::Result;
 
+/// Truncate text to a maximum number of characters, adding "..." if truncated.
+fn truncate_text(text: &str, max_chars: usize) -> String {
+    // Take only the first line to avoid multi-line posts blowing up output
+    let first_line = text.lines().next().unwrap_or(text);
+    if first_line.len() <= max_chars {
+        first_line.to_string()
+    } else {
+        let truncated: String = first_line.chars().take(max_chars).collect();
+        format!("{}...", truncated)
+    }
+}
+
 /// Result of a surface query, containing categorized highlights.
 pub struct SurfaceResult {
     pub recent_posts: Vec<Reflection>,
@@ -8,16 +20,19 @@ pub struct SurfaceResult {
     pub chain_extensions: Vec<Reflection>,
 }
 
+const MAX_RECENT_POSTS: usize = 5;
+const MAX_CHAIN_EXTENSIONS: usize = 3;
+
 /// Gather cross-repo highlights for a given repo.
 ///
-/// Returns:
-/// 1. Board posts from the last 24 hours
-/// 2. Top high-value reflections from other repos (by recall_count)
-/// 3. Recently extended learning chains (last 24 hours)
+/// Returns up to 5 recent board posts, 3 high-value cross-repo reflections,
+/// and 3 recently extended learning chains.
 pub fn surface(db: &Database, repo: &str) -> Result<SurfaceResult> {
-    let recent_posts = db.get_recent_board_posts(24)?;
+    let mut recent_posts = db.get_recent_board_posts(24)?;
+    recent_posts.truncate(MAX_RECENT_POSTS);
     let high_value = db.get_high_value_cross_repo(repo, 3)?;
-    let chain_extensions = db.get_recent_chain_extensions(24)?;
+    let mut chain_extensions = db.get_recent_chain_extensions(24)?;
+    chain_extensions.truncate(MAX_CHAIN_EXTENSIONS);
 
     Ok(SurfaceResult {
         recent_posts,
@@ -54,9 +69,10 @@ pub fn format_surface(result: &SurfaceResult, repo: &str) -> String {
             .as_deref()
             .map(|d| format!(" (domain: {})", d))
             .unwrap_or_default();
+        let preview = truncate_text(&p.text, 120);
         output.push_str(&format!(
             "- [{}] posted {}: \"{}\"{}\n",
-            p.repo, date, p.text, domain_tag
+            p.repo, date, preview, domain_tag
         ));
     }
 
@@ -66,9 +82,10 @@ pub fn format_surface(result: &SurfaceResult, repo: &str) -> String {
             .as_deref()
             .map(|d| format!(" [{}]", d))
             .unwrap_or_default();
+        let preview = truncate_text(&r.text, 120);
         output.push_str(&format!(
             "- [{}] high-value{}: \"{}\" (recalled {}x)\n",
-            r.repo, domain_tag, r.text, r.recall_count
+            r.repo, domain_tag, preview, r.recall_count
         ));
     }
 
