@@ -30,6 +30,12 @@ pub struct Reflection {
     pub text: String,
     pub created_at: String,
     pub audience: String,
+    // Phase 2.0: Synapse metadata
+    pub domain: Option<String>,
+    pub tags: Option<String>,
+    pub recall_count: i64,
+    pub last_recalled_at: Option<String>,
+    pub parent_id: Option<String>,
 }
 
 /// Aggregate statistics for a repository's reflections.
@@ -43,7 +49,9 @@ pub struct RepoStats {
 
 /// Map a database row to a Reflection struct.
 ///
-/// Shared by all queries that select (id, repo, text, created_at, audience).
+/// Shared by all queries that select
+/// (id, repo, text, created_at, audience, domain, tags, recall_count,
+///  last_recalled_at, parent_id).
 fn map_reflection_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Reflection> {
     Ok(Reflection {
         id: row.get(0)?,
@@ -51,6 +59,11 @@ fn map_reflection_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Reflection> {
         text: row.get(2)?,
         created_at: row.get(3)?,
         audience: row.get(4)?,
+        domain: row.get(5)?,
+        tags: row.get(6)?,
+        recall_count: row.get(7)?,
+        last_recalled_at: row.get(8)?,
+        parent_id: row.get(9)?,
     })
 }
 
@@ -123,6 +136,33 @@ impl Database {
                 last_read_at TEXT NOT NULL
             );",
         )?;
+
+        // Migration 2: Phase 2.0 Synapse metadata columns.
+        if !Self::has_column(conn, "reflections", "domain")? {
+            conn.execute_batch(
+                "ALTER TABLE reflections ADD COLUMN domain TEXT;",
+            )?;
+        }
+        if !Self::has_column(conn, "reflections", "tags")? {
+            conn.execute_batch(
+                "ALTER TABLE reflections ADD COLUMN tags TEXT;",
+            )?;
+        }
+        if !Self::has_column(conn, "reflections", "recall_count")? {
+            conn.execute_batch(
+                "ALTER TABLE reflections ADD COLUMN recall_count INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
+        if !Self::has_column(conn, "reflections", "last_recalled_at")? {
+            conn.execute_batch(
+                "ALTER TABLE reflections ADD COLUMN last_recalled_at TEXT;",
+            )?;
+        }
+        if !Self::has_column(conn, "reflections", "parent_id")? {
+            conn.execute_batch(
+                "ALTER TABLE reflections ADD COLUMN parent_id TEXT;",
+            )?;
+        }
 
         Ok(())
     }
@@ -235,6 +275,20 @@ impl Database {
         )?;
 
         Ok(())
+    }
+
+    /// Retrieve all reflections for reindexing.
+    ///
+    /// Returns every reflection in the database regardless of audience or
+    /// repo. Used by the `reindex` command to rebuild the search index
+    /// from the database (the source of truth).
+    pub fn get_all_for_reindex(&self) -> Result<Vec<Reflection>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, repo, text, created_at, audience FROM reflections")?;
+        let rows = stmt.query_map([], map_reflection_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
     }
 
     /// Get aggregate statistics, optionally filtered to a single repository.
@@ -417,6 +471,29 @@ mod tests {
         db.insert_reflection("rafters", "old post", "team").unwrap();
         db.mark_board_read("kelex").unwrap();
         assert_eq!(db.get_unread_count("kelex").unwrap(), 0);
+    }
+
+    #[test]
+    fn get_all_for_reindex_returns_all_reflections() {
+        let db = test_db();
+        db.insert_reflection("kelex", "one", "self").unwrap();
+        db.insert_reflection("rafters", "two", "team").unwrap();
+        db.insert_reflection("platform", "three", "self").unwrap();
+
+        let all = db.get_all_for_reindex().unwrap();
+        assert_eq!(all.len(), 3);
+
+        let repos: Vec<&str> = all.iter().map(|r| r.repo.as_str()).collect();
+        assert!(repos.contains(&"kelex"));
+        assert!(repos.contains(&"rafters"));
+        assert!(repos.contains(&"platform"));
+    }
+
+    #[test]
+    fn get_all_for_reindex_empty_db() {
+        let db = test_db();
+        let all = db.get_all_for_reindex().unwrap();
+        assert!(all.is_empty());
     }
 
     #[test]

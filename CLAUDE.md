@@ -15,6 +15,7 @@ legion post --repo <name> --text "share with the team"
 legion board --repo <name>
 legion board --count --repo <name>
 legion stats --repo <name>
+legion reindex
 ```
 
 ### Cross-Agent Consultation

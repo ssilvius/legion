@@ -104,6 +104,9 @@ enum Commands {
         count: bool,
     },
 
+    /// Rebuild the search index from the database
+    Reindex,
+
     /// Show reflection statistics
     Stats {
         /// Repository name (omit for all repos)
@@ -261,6 +264,16 @@ fn main() -> error::Result<()> {
                     print!("{output}");
                 }
             }
+        }
+        Commands::Reindex => {
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+            let index = search::SearchIndex::open(&base.join("index"))?;
+
+            let reflections = database.get_all_for_reindex()?;
+            let count = reflections.len();
+            index.rebuild(&reflections)?;
+            eprintln!("[legion] reindexed {} reflections", count);
         }
         Commands::Init { force } => {
             init::init(force)?;

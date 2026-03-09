@@ -427,6 +427,53 @@ fn board_count_output() {
 }
 
 #[test]
+fn reindex_rebuilds_from_database() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Create some reflections
+    let out = legion_cmd(dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            "test",
+            "--text",
+            "reindex test reflection about search",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "reflect failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Run reindex
+    let output = legion_cmd(dir.path()).args(["reindex"]).output().unwrap();
+    assert!(
+        output.status.success(),
+        "reindex failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("reindexed 1 reflections"),
+        "expected reindex count, got: {stderr}"
+    );
+
+    // Verify search still works after reindex
+    let output = legion_cmd(dir.path())
+        .args(["recall", "--repo", "test", "--context", "search"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("reindex test reflection"),
+        "expected reflection after reindex, got: {stdout}"
+    );
+}
+
+#[test]
 fn consult_no_matches() {
     let dir = tempfile::tempdir().unwrap();
 
