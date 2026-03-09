@@ -7,7 +7,15 @@ use tantivy::schema::{
 };
 use tantivy::{Index, IndexWriter, ReloadPolicy, TantivyDocument, Term, doc};
 
+use crate::db::Reflection;
 use crate::error::{LegionError, Result};
+
+/// Maximum number of retries when acquiring the Tantivy index writer.
+/// Another process (e.g., a concurrent hook) may hold the lock briefly.
+const WRITER_RETRIES: u32 = 3;
+
+/// Base delay between writer acquisition retries (doubles each attempt).
+const WRITER_RETRY_BASE_MS: u64 = 100;
 
 /// Full-text search index backed by Tantivy with BM25 scoring.
 ///
@@ -30,6 +38,11 @@ pub struct SearchResult {
 impl SearchIndex {
     /// Open or create a Tantivy index at the given directory path.
     ///
+    /// Uses a three-stage fallback: try to open an existing index, try to
+    /// create a new one, or wipe corrupted files and recreate. After a
+    /// wipe-and-recreate, the index starts empty -- run `legion reindex`
+    /// to repopulate from the database.
+    ///
     /// Schema fields:
     /// - `id`: STRING | STORED -- exact match, retrievable after search
     /// - `repo`: STRING -- exact match filtering per repository
@@ -49,12 +62,21 @@ impl SearchIndex {
 
         let schema = schema_builder.build();
 
-        let index = if path.join("meta.json").exists() {
-            Index::open_in_dir(path).map_err(|e| LegionError::Search(e.to_string()))?
-        } else {
-            std::fs::create_dir_all(path).map_err(|e| LegionError::Search(e.to_string()))?;
-            Index::create_in_dir(path, schema.clone())
-                .map_err(|e| LegionError::Search(e.to_string()))?
+        std::fs::create_dir_all(path).map_err(|e| LegionError::Search(e.to_string()))?;
+
+        let index = match Index::open_in_dir(path) {
+            Ok(idx) => idx,
+            Err(open_err) => {
+                // Directory may be empty (new) or corrupted -- either way, create fresh.
+                match Index::create_in_dir(path, schema.clone()) {
+                    Ok(idx) => idx,
+                    Err(_create_err) => {
+                        // Creation failed on existing corrupt files -- wipe and retry.
+                        eprintln!("[legion] search index corrupted, rebuilding: {}", open_err);
+                        Self::recreate_index(path, schema.clone())?
+                    }
+                }
+            }
         };
 
         Ok(Self {
@@ -65,18 +87,28 @@ impl SearchIndex {
         })
     }
 
+    /// Remove all files in the index directory and create a fresh index.
+    ///
+    /// Used when the existing index is corrupted (e.g., truncated meta.json)
+    /// and cannot be opened. The caller is responsible for repopulating the
+    /// index from the database afterward.
+    fn recreate_index(path: &Path, schema: Schema) -> Result<Index> {
+        std::fs::remove_dir_all(path).map_err(|e| LegionError::Search(e.to_string()))?;
+        std::fs::create_dir_all(path).map_err(|e| LegionError::Search(e.to_string()))?;
+        Index::create_in_dir(path, schema).map_err(|e| LegionError::Search(e.to_string()))
+    }
+
     /// Add a document to the search index and commit immediately.
     ///
     /// Each document consists of an id (stored for retrieval), a repo name
     /// (for filtering), and the reflection text (for BM25 scoring).
     ///
+    /// Retries up to [`WRITER_RETRIES`] times with exponential backoff when
+    /// the writer lock is held by another process (e.g., a concurrent hook).
     /// Commits after each write. The reflection corpus is tiny, so the
     /// per-write commit overhead is negligible.
     pub fn add(&self, id: &str, repo: &str, text: &str) -> Result<()> {
-        let mut writer: IndexWriter = self
-            .index
-            .writer(15_000_000)
-            .map_err(|e| LegionError::Search(e.to_string()))?;
+        let mut writer: IndexWriter = self.acquire_writer()?;
 
         writer
             .add_document(doc!(
@@ -85,6 +117,62 @@ impl SearchIndex {
                 self.text_field => text,
             ))
             .map_err(|e| LegionError::Search(e.to_string()))?;
+
+        writer
+            .commit()
+            .map_err(|e| LegionError::Search(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// Acquire the index writer with retry on lock contention.
+    ///
+    /// Tantivy allows only one writer at a time. When multiple legion
+    /// processes run concurrently (common with hooks), the writer lock
+    /// may be temporarily held. This retries with exponential backoff
+    /// before giving up.
+    fn acquire_writer(&self) -> Result<IndexWriter> {
+        let mut last_err = None;
+        for attempt in 0..=WRITER_RETRIES {
+            match self.index.writer(15_000_000) {
+                Ok(writer) => return Ok(writer),
+                Err(e) => {
+                    last_err = Some(e);
+                    if attempt < WRITER_RETRIES {
+                        let delay_ms = WRITER_RETRY_BASE_MS * 2u64.pow(attempt);
+                        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                    }
+                }
+            }
+        }
+        Err(LegionError::Search(
+            last_err
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "failed to acquire writer".to_string()),
+        ))
+    }
+
+    /// Rebuild the index from a set of reflections in a single commit.
+    ///
+    /// Clears the existing index contents first, then bulk-inserts all
+    /// provided reflections. Used by the `reindex` command to recover
+    /// from index/database desync or corruption.
+    pub fn rebuild(&self, reflections: &[Reflection]) -> Result<()> {
+        let mut writer: IndexWriter = self.acquire_writer()?;
+
+        writer
+            .delete_all_documents()
+            .map_err(|e| LegionError::Search(e.to_string()))?;
+
+        for r in reflections {
+            writer
+                .add_document(doc!(
+                    self.id_field => r.id.as_str(),
+                    self.repo_field => r.repo.as_str(),
+                    self.text_field => r.text.as_str(),
+                ))
+                .map_err(|e| LegionError::Search(e.to_string()))?;
+        }
 
         writer
             .commit()
@@ -306,6 +394,72 @@ mod tests {
         assert!(results.is_empty());
         let results = idx.search_all("   ", 5).unwrap();
         assert!(results.is_empty());
+    }
+
+    fn test_reflection(id: &str, repo: &str, text: &str) -> Reflection {
+        Reflection {
+            id: id.into(),
+            repo: repo.into(),
+            text: text.into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            audience: "self".into(),
+            domain: None,
+            tags: None,
+            recall_count: 0,
+            last_recalled_at: None,
+            parent_id: None,
+        }
+    }
+
+    #[test]
+    fn rebuild_replaces_index_contents() {
+        let (idx, _dir) = test_index();
+        idx.add("id-old", "test", "old reflection that should be gone")
+            .unwrap();
+
+        let reflections = vec![
+            test_reflection("id-1", "kelex", "new reflection one"),
+            test_reflection("id-2", "rafters", "new reflection two"),
+        ];
+        idx.rebuild(&reflections).unwrap();
+
+        // Old document should be gone
+        let old = idx.search("test", "old reflection", 5).unwrap();
+        assert!(old.is_empty());
+
+        // New documents should be present
+        let results = idx.search_all("reflection", 10).unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn rebuild_empty_clears_index() {
+        let (idx, _dir) = test_index();
+        idx.add("id-1", "test", "something searchable").unwrap();
+
+        idx.rebuild(&[]).unwrap();
+
+        let results = idx.search_all("searchable", 10).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn corrupted_index_recovers() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path();
+
+        // Create a valid index first
+        let _idx = SearchIndex::open(path).expect("initial open");
+        drop(_idx);
+
+        // Corrupt meta.json
+        std::fs::write(path.join("meta.json"), b"not valid json").expect("corrupt");
+
+        // Should recover by recreating
+        let idx = SearchIndex::open(path).expect("recovery open");
+        idx.add("id-1", "test", "works after recovery").unwrap();
+        let results = idx.search("test", "recovery", 5).unwrap();
+        assert_eq!(results.len(), 1);
     }
 
     #[test]

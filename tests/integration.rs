@@ -427,6 +427,53 @@ fn board_count_output() {
 }
 
 #[test]
+fn reindex_rebuilds_from_database() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Create some reflections
+    let out = legion_cmd(dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            "test",
+            "--text",
+            "reindex test reflection about search",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "reflect failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Run reindex
+    let output = legion_cmd(dir.path()).args(["reindex"]).output().unwrap();
+    assert!(
+        output.status.success(),
+        "reindex failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("reindexed 1 reflections"),
+        "expected reindex count, got: {stderr}"
+    );
+
+    // Verify search still works after reindex
+    let output = legion_cmd(dir.path())
+        .args(["recall", "--repo", "test", "--context", "search"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("reindex test reflection"),
+        "expected reflection after reindex, got: {stdout}"
+    );
+}
+
+#[test]
 fn consult_no_matches() {
     let dir = tempfile::tempdir().unwrap();
 
@@ -461,5 +508,282 @@ fn consult_no_matches() {
     assert!(
         stderr.contains("no reflections matched"),
         "expected no-match message on stderr, got: {stderr}"
+    );
+}
+
+#[test]
+fn reflect_with_metadata_flags() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let output = legion_cmd(dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            "kelex",
+            "--text",
+            "oklch color tokens work well",
+            "--domain",
+            "color-tokens",
+            "--tags",
+            "semantic-tokens,consumer",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "reflect with meta failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("stored reflection for kelex"),
+        "expected confirmation, got: {stderr}"
+    );
+}
+
+#[test]
+fn boost_and_chain_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Create a reflection
+    let out = legion_cmd(dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            "kelex",
+            "--text",
+            "first insight in a chain",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // Extract the ID from stderr: "stored reflection for kelex (UUID)"
+    let id = stderr
+        .trim()
+        .rsplit('(')
+        .next()
+        .unwrap()
+        .trim_end_matches(')')
+        .to_string();
+
+    // Boost the reflection
+    let output = legion_cmd(dir.path())
+        .args(["boost", "--id", &id])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "boost failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("boosted reflection"),
+        "expected boost confirmation, got: {stderr}"
+    );
+
+    // Chain with a single node
+    let output = legion_cmd(dir.path())
+        .args(["chain", "--id", &id])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "chain failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("first insight"),
+        "expected chain output, got: {stderr}"
+    );
+}
+
+#[test]
+fn chain_with_follows() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Create parent reflection
+    let out = legion_cmd(dir.path())
+        .args(["reflect", "--repo", "kelex", "--text", "root of the chain"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let parent_id = stderr
+        .trim()
+        .rsplit('(')
+        .next()
+        .unwrap()
+        .trim_end_matches(')')
+        .to_string();
+
+    // Create child reflection with --follows
+    let out = legion_cmd(dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            "kelex",
+            "--text",
+            "builds on root",
+            "--follows",
+            &parent_id,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "child reflect failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let child_id = stderr
+        .trim()
+        .rsplit('(')
+        .next()
+        .unwrap()
+        .trim_end_matches(')')
+        .to_string();
+
+    // Chain from child should show both
+    let output = legion_cmd(dir.path())
+        .args(["chain", "--id", &child_id])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("root of the chain"),
+        "expected parent in chain, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("builds on root"),
+        "expected child in chain, got: {stderr}"
+    );
+}
+
+#[test]
+fn boost_nonexistent_id() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Need to create the DB first
+    let out = legion_cmd(dir.path())
+        .args(["reflect", "--repo", "test", "--text", "setup"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let output = legion_cmd(dir.path())
+        .args(["boost", "--id", "nonexistent-uuid"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "boost should succeed even for missing ID: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("reflection not found"),
+        "expected not-found message, got: {stderr}"
+    );
+}
+
+#[test]
+fn post_with_metadata_flags() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let output = legion_cmd(dir.path())
+        .args([
+            "post",
+            "--repo",
+            "rafters",
+            "--text",
+            "shared domain knowledge",
+            "--domain",
+            "auth",
+            "--tags",
+            "security,jwt",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "post with meta failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("posted to board for rafters"),
+        "expected post confirmation, got: {stderr}"
+    );
+
+    // Verify it shows up on the board
+    let output = legion_cmd(dir.path())
+        .args(["board", "--repo", "kelex"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("shared domain knowledge"),
+        "expected post on board, got: {stdout}"
+    );
+}
+
+#[test]
+fn surface_shows_recent_posts() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Post to the board
+    let out = legion_cmd(dir.path())
+        .args(["post", "--repo", "rafters", "--text", "synapse insight"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    // Surface for a different repo should show the post
+    let output = legion_cmd(dir.path())
+        .args(["surface", "--repo", "kelex"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "surface failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("[Synapse]"),
+        "expected synapse header, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("synapse insight"),
+        "expected post in surface output, got: {stdout}"
+    );
+}
+
+#[test]
+fn surface_empty_database() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Need to initialize the DB first
+    let out = legion_cmd(dir.path())
+        .args(["reflect", "--repo", "test", "--text", "setup"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let output = legion_cmd(dir.path())
+        .args(["surface", "--repo", "kelex"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    // No board posts, no high-value, no chains -- should be empty
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.is_empty(),
+        "expected empty surface for no highlights, got: {stdout}"
     );
 }

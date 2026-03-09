@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use crate::error::{LegionError, Result};
 
 const RECALL_SCRIPT: &str = r#"#!/bin/bash
-# Legion SessionStart hook: recall relevant reflections for this repo
+# Legion SessionStart hook: recall reflections + surface cross-repo highlights
 INPUT=$(cat)
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 
@@ -25,6 +25,16 @@ fi
 # Fall back to latest reflections if BM25 found nothing
 if [ -z "$OUTPUT" ]; then
   OUTPUT=$(legion recall --repo "$REPO" --latest 2>/dev/null)
+fi
+
+# Surface cross-repo highlights (board posts, high-value reflections, chains)
+SURFACE=$(legion surface --repo "$REPO" 2>/dev/null)
+if [ -n "$SURFACE" ]; then
+  if [ -n "$OUTPUT" ]; then
+    OUTPUT="$OUTPUT"$'\n\n'"$SURFACE"
+  else
+    OUTPUT="$SURFACE"
+  fi
 fi
 
 if [ -n "$OUTPUT" ]; then

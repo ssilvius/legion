@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::db::{self, Database, Reflection};
+use crate::db::{self, Database, Reflection, ReflectionMeta};
 use crate::error::{LegionError, Result};
 use crate::reflect;
 use crate::search::SearchIndex;
@@ -9,13 +9,36 @@ use crate::search::SearchIndex;
 ///
 /// Like `reflect_from_text` but sets audience to "team" so the post
 /// appears on the shared board visible to all agents.
+#[allow(dead_code)]
 pub fn post_from_text(db: &Database, index: &SearchIndex, repo: &str, text: &str) -> Result<()> {
+    post_from_text_with_meta(db, index, repo, text, &ReflectionMeta::default())
+}
+
+/// Extract and store a board post from a transcript JSONL file.
+#[allow(dead_code)]
+pub fn post_from_transcript(
+    db: &Database,
+    index: &SearchIndex,
+    repo: &str,
+    transcript_path: &Path,
+) -> Result<()> {
+    post_from_transcript_with_meta(db, index, repo, transcript_path, &ReflectionMeta::default())
+}
+
+/// Store a board post from text with Synapse metadata.
+pub fn post_from_text_with_meta(
+    db: &Database,
+    index: &SearchIndex,
+    repo: &str,
+    text: &str,
+    meta: &ReflectionMeta,
+) -> Result<()> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return Err(LegionError::NoReflectionInput);
     }
 
-    let reflection = db.insert_reflection(repo, trimmed, "team")?;
+    let reflection = db.insert_reflection_with_meta(repo, trimmed, "team", meta)?;
     index.add(&reflection.id, repo, trimmed)?;
 
     eprintln!("posted to board for {} ({})", repo, reflection.id);
@@ -23,18 +46,16 @@ pub fn post_from_text(db: &Database, index: &SearchIndex, repo: &str, text: &str
     Ok(())
 }
 
-/// Extract and store a board post from a transcript JSONL file.
-///
-/// Uses `reflect::extract_last_assistant_message` to get the last assistant
-/// message, then stores it as a board post via `post_from_text`.
-pub fn post_from_transcript(
+/// Extract and store a board post from a transcript with Synapse metadata.
+pub fn post_from_transcript_with_meta(
     db: &Database,
     index: &SearchIndex,
     repo: &str,
     transcript_path: &Path,
+    meta: &ReflectionMeta,
 ) -> Result<()> {
     let content = reflect::extract_last_assistant_message(transcript_path)?;
-    post_from_text(db, index, repo, &content)
+    post_from_text_with_meta(db, index, repo, &content, meta)
 }
 
 /// Retrieve all board posts and mark them as read for the given reader repo.
@@ -174,6 +195,11 @@ mod tests {
                 text: "shared insight".into(),
                 created_at: "2026-03-05T12:00:00Z".into(),
                 audience: "team".into(),
+                domain: None,
+                tags: None,
+                recall_count: 0,
+                last_recalled_at: None,
+                parent_id: None,
             },
             Reflection {
                 id: "id-2".into(),
@@ -181,6 +207,11 @@ mod tests {
                 text: "another thought".into(),
                 created_at: "2026-03-04T08:00:00Z".into(),
                 audience: "team".into(),
+                domain: None,
+                tags: None,
+                recall_count: 0,
+                last_recalled_at: None,
+                parent_id: None,
             },
         ];
 

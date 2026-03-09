@@ -30,6 +30,12 @@ pub struct Reflection {
     pub text: String,
     pub created_at: String,
     pub audience: String,
+    // Phase 2.0: Synapse metadata
+    pub domain: Option<String>,
+    pub tags: Option<String>,
+    pub recall_count: i64,
+    pub last_recalled_at: Option<String>,
+    pub parent_id: Option<String>,
 }
 
 /// Aggregate statistics for a repository's reflections.
@@ -43,7 +49,9 @@ pub struct RepoStats {
 
 /// Map a database row to a Reflection struct.
 ///
-/// Shared by all queries that select (id, repo, text, created_at, audience).
+/// Shared by all queries that select
+/// (id, repo, text, created_at, audience, domain, tags, recall_count,
+///  last_recalled_at, parent_id).
 fn map_reflection_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Reflection> {
     Ok(Reflection {
         id: row.get(0)?,
@@ -51,7 +59,20 @@ fn map_reflection_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Reflection> {
         text: row.get(2)?,
         created_at: row.get(3)?,
         audience: row.get(4)?,
+        domain: row.get(5)?,
+        tags: row.get(6)?,
+        recall_count: row.get(7)?,
+        last_recalled_at: row.get(8)?,
+        parent_id: row.get(9)?,
     })
+}
+
+/// Optional metadata for a new reflection (Phase 2.0 Synapse fields).
+#[derive(Default)]
+pub struct ReflectionMeta {
+    pub domain: Option<String>,
+    pub tags: Option<String>,
+    pub parent_id: Option<String>,
 }
 
 impl Database {
@@ -124,6 +145,25 @@ impl Database {
             );",
         )?;
 
+        // Migration 2: Phase 2.0 Synapse metadata columns.
+        if !Self::has_column(conn, "reflections", "domain")? {
+            conn.execute_batch("ALTER TABLE reflections ADD COLUMN domain TEXT;")?;
+        }
+        if !Self::has_column(conn, "reflections", "tags")? {
+            conn.execute_batch("ALTER TABLE reflections ADD COLUMN tags TEXT;")?;
+        }
+        if !Self::has_column(conn, "reflections", "recall_count")? {
+            conn.execute_batch(
+                "ALTER TABLE reflections ADD COLUMN recall_count INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
+        if !Self::has_column(conn, "reflections", "last_recalled_at")? {
+            conn.execute_batch("ALTER TABLE reflections ADD COLUMN last_recalled_at TEXT;")?;
+        }
+        if !Self::has_column(conn, "reflections", "parent_id")? {
+            conn.execute_batch("ALTER TABLE reflections ADD COLUMN parent_id TEXT;")?;
+        }
+
         Ok(())
     }
 
@@ -132,13 +172,32 @@ impl Database {
     /// Generates a UUIDv7 id and ISO 8601 timestamp automatically.
     /// The `audience` parameter controls visibility: "self" for private
     /// reflections, "team" for board posts visible to all agents.
+    #[allow(dead_code)]
     pub fn insert_reflection(&self, repo: &str, text: &str, audience: &str) -> Result<Reflection> {
+        self.insert_reflection_with_meta(repo, text, audience, &ReflectionMeta::default())
+    }
+
+    /// Insert a new reflection with optional Synapse metadata.
+    ///
+    /// Like `insert_reflection` but accepts domain, tags, and parent_id
+    /// for learning chain linking and classification.
+    pub fn insert_reflection_with_meta(
+        &self,
+        repo: &str,
+        text: &str,
+        audience: &str,
+        meta: &ReflectionMeta,
+    ) -> Result<Reflection> {
         let id = Uuid::now_v7().to_string();
         let created_at = Utc::now().to_rfc3339();
 
         self.conn.execute(
-            "INSERT INTO reflections (id, repo, text, created_at, audience) VALUES (?1, ?2, ?3, ?4, ?5)",
-            (&id, repo, text, &created_at, audience),
+            "INSERT INTO reflections (id, repo, text, created_at, audience, domain, tags, parent_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                &id, repo, text, &created_at, audience,
+                &meta.domain, &meta.tags, &meta.parent_id,
+            ],
         )?;
 
         Ok(Reflection {
@@ -147,7 +206,74 @@ impl Database {
             text: text.to_owned(),
             created_at,
             audience: audience.to_owned(),
+            domain: meta.domain.clone(),
+            tags: meta.tags.clone(),
+            recall_count: 0,
+            last_recalled_at: None,
+            parent_id: meta.parent_id.clone(),
         })
+    }
+
+    /// Increment a reflection's recall count and update last_recalled_at.
+    ///
+    /// Used by `legion boost` to mark a reflection as useful after being
+    /// recalled and applied. Reflections with higher recall counts are
+    /// ranked higher in future searches.
+    pub fn boost_reflection(&self, id: &str) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let rows = self.conn.execute(
+            "UPDATE reflections SET recall_count = recall_count + 1, last_recalled_at = ?1 WHERE id = ?2",
+            (&now, id),
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Retrieve a learning chain starting from the given reflection ID.
+    ///
+    /// Walks the parent_id links backward to find the chain root, then
+    /// walks forward to collect all reflections in chronological order.
+    /// Returns an empty vec if the ID does not exist.
+    pub fn get_chain(&self, id: &str) -> Result<Vec<Reflection>> {
+        // Walk backward to find the root
+        let mut root_id = id.to_string();
+        loop {
+            let r = self.get_reflection_by_id(&root_id)?;
+            match r {
+                Some(ref reflection) if reflection.parent_id.is_some() => {
+                    root_id = reflection.parent_id.as_ref().unwrap().clone();
+                }
+                _ => break,
+            }
+        }
+
+        // Walk forward from root collecting children
+        let mut chain = Vec::new();
+        let mut current_id = Some(root_id);
+
+        while let Some(cid) = current_id {
+            match self.get_reflection_by_id(&cid)? {
+                Some(r) => {
+                    let next = self.find_child(&r.id)?;
+                    chain.push(r);
+                    current_id = next;
+                }
+                None => break,
+            }
+        }
+
+        Ok(chain)
+    }
+
+    /// Find the child reflection that follows the given parent ID.
+    fn find_child(&self, parent_id: &str) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM reflections WHERE parent_id = ?1 LIMIT 1")?;
+        let mut rows = stmt.query_map([parent_id], |row| row.get::<_, String>(0))?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
     }
 
     /// Retrieve a single reflection by its ID.
@@ -155,7 +281,7 @@ impl Database {
     /// Returns `None` if no reflection exists with the given ID.
     pub fn get_reflection_by_id(&self, id: &str) -> Result<Option<Reflection>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, repo, text, created_at, audience FROM reflections WHERE id = ?1",
+            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id FROM reflections WHERE id = ?1",
         )?;
 
         let mut rows = stmt.query_map([id], map_reflection_row)?;
@@ -170,7 +296,7 @@ impl Database {
     #[cfg(test)]
     pub fn get_reflections_by_repo(&self, repo: &str) -> Result<Vec<Reflection>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, repo, text, created_at, audience FROM reflections WHERE repo = ?1 ORDER BY created_at DESC",
+            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id FROM reflections WHERE repo = ?1 ORDER BY created_at DESC",
         )?;
 
         let rows = stmt.query_map([repo], map_reflection_row)?;
@@ -184,7 +310,7 @@ impl Database {
     /// number of results are needed, since the database handles the LIMIT.
     pub fn get_latest_reflections(&self, repo: &str, limit: usize) -> Result<Vec<Reflection>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, repo, text, created_at, audience FROM reflections WHERE repo = ?1 ORDER BY created_at DESC LIMIT ?2",
+            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id FROM reflections WHERE repo = ?1 ORDER BY created_at DESC LIMIT ?2",
         )?;
 
         let rows = stmt.query_map(rusqlite::params![repo, limit], map_reflection_row)?;
@@ -195,7 +321,7 @@ impl Database {
     /// Retrieve all board posts (audience = "team"), ordered newest first.
     pub fn get_board_posts(&self) -> Result<Vec<Reflection>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, repo, text, created_at, audience FROM reflections WHERE audience = 'team' ORDER BY created_at DESC",
+            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id FROM reflections WHERE audience = 'team' ORDER BY created_at DESC",
         )?;
 
         let rows = stmt.query_map([], map_reflection_row)?;
@@ -237,6 +363,20 @@ impl Database {
         Ok(())
     }
 
+    /// Retrieve all reflections for reindexing.
+    ///
+    /// Returns every reflection in the database regardless of audience or
+    /// repo. Used by the `reindex` command to rebuild the search index
+    /// from the database (the source of truth).
+    pub fn get_all_for_reindex(&self) -> Result<Vec<Reflection>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id FROM reflections")?;
+        let rows = stmt.query_map([], map_reflection_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
     /// Get aggregate statistics, optionally filtered to a single repository.
     pub fn get_stats(&self, repo: Option<&str>) -> Result<Vec<RepoStats>> {
         let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<RepoStats> {
@@ -263,6 +403,51 @@ impl Database {
             None => stmt.query_map([], map_row)?,
         };
 
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
+    /// Get recent board posts (within last N hours).
+    pub fn get_recent_board_posts(&self, hours: i64) -> Result<Vec<Reflection>> {
+        let cutoff = (Utc::now() - chrono::Duration::hours(hours)).to_rfc3339();
+        let mut stmt = self.conn.prepare(
+            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
+             FROM reflections WHERE audience = 'team' AND created_at > ?1 ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([&cutoff], map_reflection_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
+    /// Get high-value reflections from other repos (by recall_count).
+    ///
+    /// Returns reflections with recall_count > 0 from repos other than
+    /// the given one, ordered by recall_count descending.
+    pub fn get_high_value_cross_repo(
+        &self,
+        exclude_repo: &str,
+        limit: usize,
+    ) -> Result<Vec<Reflection>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
+             FROM reflections WHERE repo != ?1 AND recall_count > 0 ORDER BY recall_count DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![exclude_repo, limit], map_reflection_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
+    /// Get recently extended learning chains.
+    ///
+    /// Returns reflections that have a parent_id and were created within
+    /// the last N hours, indicating a chain was recently extended.
+    pub fn get_recent_chain_extensions(&self, hours: i64) -> Result<Vec<Reflection>> {
+        let cutoff = (Utc::now() - chrono::Duration::hours(hours)).to_rfc3339();
+        let mut stmt = self.conn.prepare(
+            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
+             FROM reflections WHERE parent_id IS NOT NULL AND created_at > ?1 ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([&cutoff], map_reflection_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(LegionError::Database)
     }
@@ -420,6 +605,29 @@ mod tests {
     }
 
     #[test]
+    fn get_all_for_reindex_returns_all_reflections() {
+        let db = test_db();
+        db.insert_reflection("kelex", "one", "self").unwrap();
+        db.insert_reflection("rafters", "two", "team").unwrap();
+        db.insert_reflection("platform", "three", "self").unwrap();
+
+        let all = db.get_all_for_reindex().unwrap();
+        assert_eq!(all.len(), 3);
+
+        let repos: Vec<&str> = all.iter().map(|r| r.repo.as_str()).collect();
+        assert!(repos.contains(&"kelex"));
+        assert!(repos.contains(&"rafters"));
+        assert!(repos.contains(&"platform"));
+    }
+
+    #[test]
+    fn get_all_for_reindex_empty_db() {
+        let db = test_db();
+        let all = db.get_all_for_reindex().unwrap();
+        assert!(all.is_empty());
+    }
+
+    #[test]
     fn existing_reflections_default_to_self() {
         let db = test_db();
         let r = db
@@ -465,5 +673,141 @@ mod tests {
         db.insert_reflection("platform", "new post", "team")
             .unwrap();
         assert_eq!(db.get_unread_count("kelex").unwrap(), 1);
+    }
+
+    #[test]
+    fn insert_with_meta_stores_domain_and_tags() {
+        let db = test_db();
+        let meta = ReflectionMeta {
+            domain: Some("color-tokens".into()),
+            tags: Some("semantic-tokens,consumer".into()),
+            parent_id: None,
+        };
+        let r = db
+            .insert_reflection_with_meta("kelex", "oklch insight", "self", &meta)
+            .unwrap();
+        assert_eq!(r.domain.as_deref(), Some("color-tokens"));
+        assert_eq!(r.tags.as_deref(), Some("semantic-tokens,consumer"));
+        assert!(r.parent_id.is_none());
+
+        let fetched = db.get_reflection_by_id(&r.id).unwrap().unwrap();
+        assert_eq!(fetched.domain.as_deref(), Some("color-tokens"));
+        assert_eq!(fetched.tags.as_deref(), Some("semantic-tokens,consumer"));
+    }
+
+    #[test]
+    fn insert_with_meta_stores_parent_id() {
+        let db = test_db();
+        let parent = db.insert_reflection("kelex", "first", "self").unwrap();
+        let meta = ReflectionMeta {
+            domain: None,
+            tags: None,
+            parent_id: Some(parent.id.clone()),
+        };
+        let child = db
+            .insert_reflection_with_meta("kelex", "follows up", "self", &meta)
+            .unwrap();
+        assert_eq!(child.parent_id.as_deref(), Some(parent.id.as_str()));
+    }
+
+    #[test]
+    fn boost_increments_recall_count() {
+        let db = test_db();
+        let r = db
+            .insert_reflection("kelex", "useful insight", "self")
+            .unwrap();
+        assert_eq!(r.recall_count, 0);
+        assert!(r.last_recalled_at.is_none());
+
+        let found = db.boost_reflection(&r.id).unwrap();
+        assert!(found);
+
+        let boosted = db.get_reflection_by_id(&r.id).unwrap().unwrap();
+        assert_eq!(boosted.recall_count, 1);
+        assert!(boosted.last_recalled_at.is_some());
+
+        db.boost_reflection(&r.id).unwrap();
+        let double = db.get_reflection_by_id(&r.id).unwrap().unwrap();
+        assert_eq!(double.recall_count, 2);
+    }
+
+    #[test]
+    fn boost_nonexistent_returns_false() {
+        let db = test_db();
+        let found = db.boost_reflection("nonexistent-id").unwrap();
+        assert!(!found);
+    }
+
+    #[test]
+    fn get_chain_single_node() {
+        let db = test_db();
+        let r = db.insert_reflection("kelex", "standalone", "self").unwrap();
+        let chain = db.get_chain(&r.id).unwrap();
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].id, r.id);
+    }
+
+    #[test]
+    fn get_chain_three_links() {
+        let db = test_db();
+        let first = db
+            .insert_reflection("kelex", "root insight", "self")
+            .unwrap();
+        let second = db
+            .insert_reflection_with_meta(
+                "kelex",
+                "builds on root",
+                "self",
+                &ReflectionMeta {
+                    parent_id: Some(first.id.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let third = db
+            .insert_reflection_with_meta(
+                "kelex",
+                "final refinement",
+                "self",
+                &ReflectionMeta {
+                    parent_id: Some(second.id.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        // Querying from any node should return the full chain in order
+        let chain = db.get_chain(&third.id).unwrap();
+        assert_eq!(chain.len(), 3);
+        assert_eq!(chain[0].id, first.id);
+        assert_eq!(chain[1].id, second.id);
+        assert_eq!(chain[2].id, third.id);
+
+        let from_middle = db.get_chain(&second.id).unwrap();
+        assert_eq!(from_middle.len(), 3);
+        assert_eq!(from_middle[0].id, first.id);
+    }
+
+    #[test]
+    fn get_chain_nonexistent_returns_empty() {
+        let db = test_db();
+        let chain = db.get_chain("nonexistent").unwrap();
+        assert!(chain.is_empty());
+    }
+
+    #[test]
+    fn get_reflection_by_id_found() {
+        let db = test_db();
+        let r = db.insert_reflection("kelex", "findable", "self").unwrap();
+        let found = db.get_reflection_by_id(&r.id).unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().text, "findable");
+    }
+
+    #[test]
+    fn get_reflection_by_id_not_found() {
+        let db = test_db();
+        let found = db.get_reflection_by_id("no-such-id").unwrap();
+        assert!(found.is_none());
     }
 }

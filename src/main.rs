@@ -6,6 +6,7 @@ mod recall;
 mod reflect;
 mod search;
 mod stats;
+mod surface;
 #[cfg(test)]
 mod testutil;
 
@@ -39,6 +40,18 @@ enum Commands {
         /// Path to session transcript JSONL file
         #[arg(long, conflicts_with = "text")]
         transcript: Option<PathBuf>,
+
+        /// Domain tag for classification (e.g., "color-tokens", "auth")
+        #[arg(long)]
+        domain: Option<String>,
+
+        /// Comma-separated tags (e.g., "semantic-tokens,consumer,debugging")
+        #[arg(long)]
+        tags: Option<String>,
+
+        /// Link to a parent reflection ID to form a learning chain
+        #[arg(long)]
+        follows: Option<String>,
     },
 
     /// Recall relevant reflections for the current context
@@ -91,6 +104,32 @@ enum Commands {
         /// Path to session transcript JSONL file
         #[arg(long, conflicts_with = "text")]
         transcript: Option<PathBuf>,
+
+        /// Domain tag for classification
+        #[arg(long)]
+        domain: Option<String>,
+
+        /// Comma-separated tags
+        #[arg(long)]
+        tags: Option<String>,
+
+        /// Link to a parent reflection ID to form a learning chain
+        #[arg(long)]
+        follows: Option<String>,
+    },
+
+    /// Mark a reflection as useful after recalling and applying it
+    Boost {
+        /// Reflection ID to boost
+        #[arg(long)]
+        id: String,
+    },
+
+    /// Trace a learning chain from a reflection
+    Chain {
+        /// Any reflection ID in the chain
+        #[arg(long)]
+        id: String,
     },
 
     /// Read the shared board or check for unread posts
@@ -103,6 +142,16 @@ enum Commands {
         #[arg(long)]
         count: bool,
     },
+
+    /// Surface cross-repo highlights for a session start
+    Surface {
+        /// Repository name
+        #[arg(long)]
+        repo: String,
+    },
+
+    /// Rebuild the search index from the database
+    Reindex,
 
     /// Show reflection statistics
     Stats {
@@ -124,23 +173,28 @@ fn data_dir() -> error::Result<PathBuf> {
     Ok(path)
 }
 
-/// Run a compound command (text or transcript) across multiple repos.
-///
-/// Shared by both Reflect and Post to avoid duplicating the repo loop,
-/// input validation, and error-collection logic.
+/// Run a compound command (text or transcript) across multiple repos with metadata.
 #[allow(clippy::too_many_arguments)]
-fn run_compound_command(
+fn run_compound_command_with_meta(
     db: &db::Database,
     index: &search::SearchIndex,
     repos: &[String],
     text: &Option<String>,
     transcript: &Option<PathBuf>,
-    from_text: fn(&db::Database, &search::SearchIndex, &str, &str) -> error::Result<()>,
+    meta: &db::ReflectionMeta,
+    from_text: fn(
+        &db::Database,
+        &search::SearchIndex,
+        &str,
+        &str,
+        &db::ReflectionMeta,
+    ) -> error::Result<()>,
     from_transcript: fn(
         &db::Database,
         &search::SearchIndex,
         &str,
         &std::path::Path,
+        &db::ReflectionMeta,
     ) -> error::Result<()>,
     label: &str,
 ) -> error::Result<()> {
@@ -151,8 +205,8 @@ fn run_compound_command(
     let mut had_error = false;
     for r in repos {
         let result = match (text, transcript) {
-            (Some(t), None) => from_text(db, index, r, t),
-            (None, Some(path)) => from_transcript(db, index, r, path),
+            (Some(t), None) => from_text(db, index, r, t, meta),
+            (None, Some(path)) => from_transcript(db, index, r, path, meta),
             (Some(_), Some(_)) => return Err(error::LegionError::NoReflectionInput),
             (None, None) => unreachable!("guarded by early return above"),
         };
@@ -175,19 +229,28 @@ fn main() -> error::Result<()> {
             repo,
             text,
             transcript,
+            domain,
+            tags,
+            follows,
         } => {
             let base = data_dir()?;
             let database = db::Database::open(&base.join("legion.db"))?;
             let index = search::SearchIndex::open(&base.join("index"))?;
+            let meta = db::ReflectionMeta {
+                domain,
+                tags,
+                parent_id: follows,
+            };
 
-            run_compound_command(
+            run_compound_command_with_meta(
                 &database,
                 &index,
                 &repo,
                 &text,
                 &transcript,
-                reflect::reflect_from_text,
-                reflect::reflect_from_transcript,
+                &meta,
+                reflect::reflect_from_text_with_meta,
+                reflect::reflect_from_transcript_with_meta,
                 "storing reflection",
             )?;
         }
@@ -228,21 +291,69 @@ fn main() -> error::Result<()> {
             repo,
             text,
             transcript,
+            domain,
+            tags,
+            follows,
         } => {
             let base = data_dir()?;
             let database = db::Database::open(&base.join("legion.db"))?;
             let index = search::SearchIndex::open(&base.join("index"))?;
+            let meta = db::ReflectionMeta {
+                domain,
+                tags,
+                parent_id: follows,
+            };
 
-            run_compound_command(
+            run_compound_command_with_meta(
                 &database,
                 &index,
                 &repo,
                 &text,
                 &transcript,
-                board::post_from_text,
-                board::post_from_transcript,
+                &meta,
+                board::post_from_text_with_meta,
+                board::post_from_transcript_with_meta,
                 "posting",
             )?;
+        }
+        Commands::Boost { id } => {
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+
+            if database.boost_reflection(&id)? {
+                eprintln!("[legion] boosted reflection {}", id);
+            } else {
+                eprintln!("[legion] reflection not found: {}", id);
+            }
+        }
+        Commands::Chain { id } => {
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+
+            let chain = database.get_chain(&id)?;
+            if chain.is_empty() {
+                eprintln!("[legion] no chain found for {}", id);
+            } else {
+                for (i, r) in chain.iter().enumerate() {
+                    let prefix = if i == 0 {
+                        String::new()
+                    } else {
+                        "  ".repeat(i) + "-> "
+                    };
+                    let date = db::format_date(&r.created_at);
+                    let domain_tag = r
+                        .domain
+                        .as_deref()
+                        .map(|d| format!(" [{}]", d))
+                        .unwrap_or_default();
+                    let truncated: String = r.text.chars().take(80).collect();
+                    let ellipsis = if r.text.len() > 80 { "..." } else { "" };
+                    eprintln!(
+                        "{}{} {}{}: {}{}",
+                        prefix, r.repo, date, domain_tag, truncated, ellipsis
+                    );
+                }
+            }
         }
         Commands::Board { repo, count } => {
             let base = data_dir()?;
@@ -262,8 +373,28 @@ fn main() -> error::Result<()> {
                 }
             }
         }
+        Commands::Reindex => {
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+            let index = search::SearchIndex::open(&base.join("index"))?;
+
+            let reflections = database.get_all_for_reindex()?;
+            let count = reflections.len();
+            index.rebuild(&reflections)?;
+            eprintln!("[legion] reindexed {} reflections", count);
+        }
         Commands::Init { force } => {
             init::init(force)?;
+        }
+        Commands::Surface { repo } => {
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+
+            let result = surface::surface(&database, &repo)?;
+            let output = surface::format_surface(&result, &repo);
+            if !output.is_empty() {
+                print!("{output}");
+            }
         }
         Commands::Stats { repo } => {
             let base = data_dir()?;
