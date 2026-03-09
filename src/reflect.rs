@@ -3,7 +3,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use crate::db::Database;
+use crate::db::{Database, ReflectionMeta};
 use crate::error::{LegionError, Result};
 use crate::search::SearchIndex;
 
@@ -59,13 +59,36 @@ pub fn extract_last_assistant_message(transcript_path: &Path) -> Result<String> 
 /// Validates that text is non-empty, inserts into SQLite via
 /// `db.insert_reflection()`, and adds to the Tantivy search index
 /// via `index.add()`. Prints a confirmation message to stdout.
+#[allow(dead_code)]
 pub fn reflect_from_text(db: &Database, index: &SearchIndex, repo: &str, text: &str) -> Result<()> {
+    reflect_from_text_with_meta(db, index, repo, text, &ReflectionMeta::default())
+}
+
+/// Extract and store a reflection from a transcript JSONL file.
+#[allow(dead_code)]
+pub fn reflect_from_transcript(
+    db: &Database,
+    index: &SearchIndex,
+    repo: &str,
+    transcript_path: &Path,
+) -> Result<()> {
+    reflect_from_transcript_with_meta(db, index, repo, transcript_path, &ReflectionMeta::default())
+}
+
+/// Store a reflection from text with Synapse metadata.
+pub fn reflect_from_text_with_meta(
+    db: &Database,
+    index: &SearchIndex,
+    repo: &str,
+    text: &str,
+    meta: &ReflectionMeta,
+) -> Result<()> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return Err(LegionError::NoReflectionInput);
     }
 
-    let reflection = db.insert_reflection(repo, trimmed, "self")?;
+    let reflection = db.insert_reflection_with_meta(repo, trimmed, "self", meta)?;
     index.add(&reflection.id, repo, trimmed)?;
 
     eprintln!("stored reflection for {} ({})", repo, reflection.id);
@@ -73,18 +96,16 @@ pub fn reflect_from_text(db: &Database, index: &SearchIndex, repo: &str, text: &
     Ok(())
 }
 
-/// Extract and store a reflection from a transcript JSONL file.
-///
-/// Uses `extract_last_assistant_message` to get the last assistant
-/// message, then stores it as a reflection via `reflect_from_text`.
-pub fn reflect_from_transcript(
+/// Extract and store a reflection from a transcript with Synapse metadata.
+pub fn reflect_from_transcript_with_meta(
     db: &Database,
     index: &SearchIndex,
     repo: &str,
     transcript_path: &Path,
+    meta: &ReflectionMeta,
 ) -> Result<()> {
     let content = extract_last_assistant_message(transcript_path)?;
-    reflect_from_text(db, index, repo, &content)
+    reflect_from_text_with_meta(db, index, repo, &content, meta)
 }
 
 #[cfg(test)]

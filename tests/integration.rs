@@ -510,3 +510,224 @@ fn consult_no_matches() {
         "expected no-match message on stderr, got: {stderr}"
     );
 }
+
+#[test]
+fn reflect_with_metadata_flags() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let output = legion_cmd(dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            "kelex",
+            "--text",
+            "oklch color tokens work well",
+            "--domain",
+            "color-tokens",
+            "--tags",
+            "semantic-tokens,consumer",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "reflect with meta failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("stored reflection for kelex"),
+        "expected confirmation, got: {stderr}"
+    );
+}
+
+#[test]
+fn boost_and_chain_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Create a reflection
+    let out = legion_cmd(dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            "kelex",
+            "--text",
+            "first insight in a chain",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // Extract the ID from stderr: "stored reflection for kelex (UUID)"
+    let id = stderr
+        .trim()
+        .rsplit('(')
+        .next()
+        .unwrap()
+        .trim_end_matches(')')
+        .to_string();
+
+    // Boost the reflection
+    let output = legion_cmd(dir.path())
+        .args(["boost", "--id", &id])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "boost failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("boosted reflection"),
+        "expected boost confirmation, got: {stderr}"
+    );
+
+    // Chain with a single node
+    let output = legion_cmd(dir.path())
+        .args(["chain", "--id", &id])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "chain failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("first insight"),
+        "expected chain output, got: {stderr}"
+    );
+}
+
+#[test]
+fn chain_with_follows() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Create parent reflection
+    let out = legion_cmd(dir.path())
+        .args(["reflect", "--repo", "kelex", "--text", "root of the chain"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let parent_id = stderr
+        .trim()
+        .rsplit('(')
+        .next()
+        .unwrap()
+        .trim_end_matches(')')
+        .to_string();
+
+    // Create child reflection with --follows
+    let out = legion_cmd(dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            "kelex",
+            "--text",
+            "builds on root",
+            "--follows",
+            &parent_id,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "child reflect failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let child_id = stderr
+        .trim()
+        .rsplit('(')
+        .next()
+        .unwrap()
+        .trim_end_matches(')')
+        .to_string();
+
+    // Chain from child should show both
+    let output = legion_cmd(dir.path())
+        .args(["chain", "--id", &child_id])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("root of the chain"),
+        "expected parent in chain, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("builds on root"),
+        "expected child in chain, got: {stderr}"
+    );
+}
+
+#[test]
+fn boost_nonexistent_id() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Need to create the DB first
+    let out = legion_cmd(dir.path())
+        .args(["reflect", "--repo", "test", "--text", "setup"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let output = legion_cmd(dir.path())
+        .args(["boost", "--id", "nonexistent-uuid"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "boost should succeed even for missing ID: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("reflection not found"),
+        "expected not-found message, got: {stderr}"
+    );
+}
+
+#[test]
+fn post_with_metadata_flags() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let output = legion_cmd(dir.path())
+        .args([
+            "post",
+            "--repo",
+            "rafters",
+            "--text",
+            "shared domain knowledge",
+            "--domain",
+            "auth",
+            "--tags",
+            "security,jwt",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "post with meta failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("posted to board for rafters"),
+        "expected post confirmation, got: {stderr}"
+    );
+
+    // Verify it shows up on the board
+    let output = legion_cmd(dir.path())
+        .args(["board", "--repo", "kelex"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("shared domain knowledge"),
+        "expected post on board, got: {stdout}"
+    );
+}

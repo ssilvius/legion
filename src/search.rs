@@ -403,6 +403,11 @@ mod tests {
             text: text.into(),
             created_at: "2026-01-01T00:00:00Z".into(),
             audience: "self".into(),
+            domain: None,
+            tags: None,
+            recall_count: 0,
+            last_recalled_at: None,
+            parent_id: None,
         }
     }
 
