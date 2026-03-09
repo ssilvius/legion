@@ -6,6 +6,17 @@ use uuid::Uuid;
 
 use crate::error::{LegionError, Result};
 
+/// Format an ISO 8601 timestamp to a date-only string (YYYY-MM-DD).
+///
+/// Falls back to the raw value if parsing fails, which keeps output
+/// usable even with unexpected timestamp formats.
+pub(crate) fn format_date(iso_timestamp: &str) -> &str {
+    match iso_timestamp.split_once('T') {
+        Some((date, _)) => date,
+        None => iso_timestamp,
+    }
+}
+
 /// Persistent storage for reflections backed by SQLite.
 pub struct Database {
     conn: Connection,
@@ -54,17 +65,37 @@ impl Database {
         }
 
         let conn = Connection::open(path)?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
+
+        let mode: String = conn
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .map_err(LegionError::Database)?;
+        if mode != "wal" {
+            conn.pragma_update(None, "journal_mode", "WAL")?;
+        }
+
         Self::init_schema(&conn)?;
 
         Ok(Self { conn })
     }
 
+    /// Check whether a table has a specific column via PRAGMA table_info.
+    fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table))?;
+        let names: Vec<String> = stmt
+            .query_map([], |row| {
+                let name: String = row.get(1)?;
+                Ok(name)
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)?;
+        Ok(names.iter().any(|n| n == column))
+    }
+
     /// Create the reflections table, indexes, and supporting tables.
     ///
-    /// Runs migrations for columns added after the initial schema (e.g.
-    /// audience). ALTER TABLE failures are caught so that running against
-    /// an already-migrated database is safe.
+    /// Uses `has_column` checks to skip already-applied migrations, so
+    /// on a fully-migrated database this does minimal work (CREATE IF NOT
+    /// EXISTS checks and a single PRAGMA query).
     fn init_schema(conn: &Connection) -> Result<()> {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS reflections (
@@ -78,16 +109,12 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_reflections_created ON reflections(created_at);",
         )?;
 
-        // Migration: add audience column. Catches "duplicate column name" errors
-        // so this is safe to run on databases that already have the column.
-        let add_audience = conn.execute_batch(
-            "ALTER TABLE reflections ADD COLUMN audience TEXT NOT NULL DEFAULT 'self';",
-        );
-        match add_audience {
-            Ok(()) => {}
-            Err(rusqlite::Error::SqliteFailure(_, Some(ref msg)))
-                if msg.contains("duplicate column name") => {}
-            Err(e) => return Err(LegionError::Database(e)),
+        // Migration 1: add audience column + board_reads table.
+        // Only run when the column does not yet exist.
+        if !Self::has_column(conn, "reflections", "audience")? {
+            conn.execute_batch(
+                "ALTER TABLE reflections ADD COLUMN audience TEXT NOT NULL DEFAULT 'self';",
+            )?;
         }
 
         conn.execute_batch(
@@ -140,12 +167,27 @@ impl Database {
     }
 
     /// Retrieve all reflections for a repository, ordered newest first.
+    #[cfg(test)]
     pub fn get_reflections_by_repo(&self, repo: &str) -> Result<Vec<Reflection>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo, text, created_at, audience FROM reflections WHERE repo = ?1 ORDER BY created_at DESC",
         )?;
 
         let rows = stmt.query_map([repo], map_reflection_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
+    /// Retrieve the most recent reflections for a repository, limited by SQL.
+    ///
+    /// More efficient than `get_reflections_by_repo` when only a small
+    /// number of results are needed, since the database handles the LIMIT.
+    pub fn get_latest_reflections(&self, repo: &str, limit: usize) -> Result<Vec<Reflection>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, repo, text, created_at, audience FROM reflections WHERE repo = ?1 ORDER BY created_at DESC LIMIT ?2",
+        )?;
+
+        let rows = stmt.query_map(rusqlite::params![repo, limit], map_reflection_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(LegionError::Database)
     }

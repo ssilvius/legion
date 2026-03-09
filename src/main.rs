@@ -124,6 +124,49 @@ fn data_dir() -> error::Result<PathBuf> {
     Ok(path)
 }
 
+/// Run a compound command (text or transcript) across multiple repos.
+///
+/// Shared by both Reflect and Post to avoid duplicating the repo loop,
+/// input validation, and error-collection logic.
+#[allow(clippy::too_many_arguments)]
+fn run_compound_command(
+    db: &db::Database,
+    index: &search::SearchIndex,
+    repos: &[String],
+    text: &Option<String>,
+    transcript: &Option<PathBuf>,
+    from_text: fn(&db::Database, &search::SearchIndex, &str, &str) -> error::Result<()>,
+    from_transcript: fn(
+        &db::Database,
+        &search::SearchIndex,
+        &str,
+        &std::path::Path,
+    ) -> error::Result<()>,
+    label: &str,
+) -> error::Result<()> {
+    if text.is_none() && transcript.is_none() {
+        return Err(error::LegionError::NoReflectionInput);
+    }
+
+    let mut had_error = false;
+    for r in repos {
+        let result = match (text, transcript) {
+            (Some(t), None) => from_text(db, index, r, t),
+            (None, Some(path)) => from_transcript(db, index, r, path),
+            (Some(_), Some(_)) => return Err(error::LegionError::NoReflectionInput),
+            (None, None) => unreachable!("guarded by early return above"),
+        };
+        if let Err(e) = result {
+            eprintln!("[legion] error {label} for {r}: {e}");
+            had_error = true;
+        }
+    }
+    if had_error {
+        return Err(error::LegionError::ReflectPartialFailure);
+    }
+    Ok(())
+}
+
 fn main() -> error::Result<()> {
     let cli = Cli::parse();
 
@@ -137,27 +180,16 @@ fn main() -> error::Result<()> {
             let database = db::Database::open(&base.join("legion.db"))?;
             let index = search::SearchIndex::open(&base.join("index"))?;
 
-            if text.is_none() && transcript.is_none() {
-                return Err(error::LegionError::NoReflectionInput);
-            }
-
-            let mut had_error = false;
-            for r in &repo {
-                let result = match (&text, &transcript) {
-                    (Some(t), None) => reflect::reflect_from_text(&database, &index, r, t),
-                    (None, Some(path)) => {
-                        reflect::reflect_from_transcript(&database, &index, r, path)
-                    }
-                    _ => unreachable!("validated above"),
-                };
-                if let Err(e) = result {
-                    eprintln!("[legion] error storing reflection for {r}: {e}");
-                    had_error = true;
-                }
-            }
-            if had_error {
-                return Err(error::LegionError::ReflectPartialFailure);
-            }
+            run_compound_command(
+                &database,
+                &index,
+                &repo,
+                &text,
+                &transcript,
+                reflect::reflect_from_text,
+                reflect::reflect_from_transcript,
+                "storing reflection",
+            )?;
         }
         Commands::Recall {
             repo,
@@ -201,25 +233,16 @@ fn main() -> error::Result<()> {
             let database = db::Database::open(&base.join("legion.db"))?;
             let index = search::SearchIndex::open(&base.join("index"))?;
 
-            if text.is_none() && transcript.is_none() {
-                return Err(error::LegionError::NoReflectionInput);
-            }
-
-            let mut had_error = false;
-            for r in &repo {
-                let result = match (&text, &transcript) {
-                    (Some(t), None) => board::post_from_text(&database, &index, r, t),
-                    (None, Some(path)) => board::post_from_transcript(&database, &index, r, path),
-                    _ => unreachable!("validated above"),
-                };
-                if let Err(e) = result {
-                    eprintln!("[legion] error posting for {r}: {e}");
-                    had_error = true;
-                }
-            }
-            if had_error {
-                return Err(error::LegionError::ReflectPartialFailure);
-            }
+            run_compound_command(
+                &database,
+                &index,
+                &repo,
+                &text,
+                &transcript,
+                board::post_from_text,
+                board::post_from_transcript,
+                "posting",
+            )?;
         }
         Commands::Board { repo, count } => {
             let base = data_dir()?;

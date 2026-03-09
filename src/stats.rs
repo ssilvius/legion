@@ -1,18 +1,5 @@
-use crate::db::Database;
+use crate::db::{self, Database};
 use crate::error::Result;
-
-/// Format an ISO 8601 timestamp to a date-only string (YYYY-MM-DD).
-///
-/// Falls back to the raw value if parsing fails, which keeps output
-/// usable even with unexpected timestamp formats.
-fn format_date(iso_timestamp: &str) -> String {
-    // created_at is RFC 3339, e.g. "2026-03-05T12:34:56.789+00:00"
-    // Extract the date portion before the 'T' separator.
-    match iso_timestamp.split_once('T') {
-        Some((date, _)) => date.to_owned(),
-        None => iso_timestamp.to_owned(),
-    }
-}
 
 /// Print stats for a specific repo or all repos.
 ///
@@ -34,8 +21,8 @@ pub fn stats(db: &Database, repo: Option<&str>) -> Result<()> {
 
     for s in &repo_stats {
         total_count += s.count;
-        let oldest = format_date(&s.oldest);
-        let newest = format_date(&s.newest);
+        let oldest = db::format_date(&s.oldest);
+        let newest = db::format_date(&s.newest);
         println!(
             "{}: {} reflections ({} to {})",
             s.repo, s.count, oldest, newest
@@ -115,19 +102,19 @@ mod tests {
     #[test]
     fn format_date_extracts_date_portion() {
         let ts = "2026-03-05T12:34:56.789+00:00";
-        assert_eq!(format_date(ts), "2026-03-05");
+        assert_eq!(db::format_date(ts), "2026-03-05");
     }
 
     #[test]
     fn format_date_handles_no_time() {
         // If for some reason the value has no 'T', return it as-is.
         let ts = "2026-03-05";
-        assert_eq!(format_date(ts), "2026-03-05");
+        assert_eq!(db::format_date(ts), "2026-03-05");
     }
 
     #[test]
     fn format_date_handles_utc_z_suffix() {
         let ts = "2026-03-05T08:00:00Z";
-        assert_eq!(format_date(ts), "2026-03-05");
+        assert_eq!(db::format_date(ts), "2026-03-05");
     }
 }

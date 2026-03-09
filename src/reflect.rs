@@ -14,6 +14,46 @@ struct TranscriptLine {
     content: String,
 }
 
+/// Extract the last assistant message from a transcript JSONL file.
+///
+/// Reads the file line by line. Each line is expected to be JSON with
+/// "role" and "content" fields. Malformed lines are silently skipped.
+/// The last line where `role == "assistant"` is returned.
+///
+/// Returns `LegionError::TranscriptNotFound` if the file does not exist.
+/// Returns `LegionError::NoReflectionInput` if no assistant message is found.
+pub fn extract_last_assistant_message(transcript_path: &Path) -> Result<String> {
+    let file = match std::fs::File::open(transcript_path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(LegionError::TranscriptNotFound(
+                transcript_path.to_path_buf(),
+            ));
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let reader = std::io::BufReader::new(file);
+
+    let mut last_assistant_content: Option<String> = None;
+
+    for line in reader.lines() {
+        let line = line?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        // Malformed lines are skipped
+        if let Ok(entry) = serde_json::from_str::<TranscriptLine>(trimmed)
+            && entry.role == "assistant"
+        {
+            last_assistant_content = Some(entry.content);
+        }
+    }
+
+    last_assistant_content.ok_or(LegionError::NoReflectionInput)
+}
+
 /// Store a reflection from direct text input.
 ///
 /// Validates that text is non-empty, inserts into SQLite via
@@ -35,49 +75,16 @@ pub fn reflect_from_text(db: &Database, index: &SearchIndex, repo: &str, text: &
 
 /// Extract and store a reflection from a transcript JSONL file.
 ///
-/// Reads the file line by line. Each line is expected to be JSON with
-/// "role" and "content" fields. Malformed lines are silently skipped.
-/// The last line where `role == "assistant"` is used as the reflection
-/// text.
-///
-/// Returns `LegionError::TranscriptNotFound` if the file does not exist.
-/// Returns `LegionError::NoReflectionInput` if no assistant message is found.
+/// Uses `extract_last_assistant_message` to get the last assistant
+/// message, then stores it as a reflection via `reflect_from_text`.
 pub fn reflect_from_transcript(
     db: &Database,
     index: &SearchIndex,
     repo: &str,
     transcript_path: &Path,
 ) -> Result<()> {
-    if !transcript_path.exists() {
-        return Err(LegionError::TranscriptNotFound(
-            transcript_path.to_path_buf(),
-        ));
-    }
-
-    let file = std::fs::File::open(transcript_path)?;
-    let reader = std::io::BufReader::new(file);
-
-    let mut last_assistant_content: Option<String> = None;
-
-    for line in reader.lines() {
-        let line = line?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        // Malformed lines are skipped
-        if let Ok(entry) = serde_json::from_str::<TranscriptLine>(trimmed)
-            && entry.role == "assistant"
-        {
-            last_assistant_content = Some(entry.content);
-        }
-    }
-
-    match last_assistant_content {
-        Some(content) => reflect_from_text(db, index, repo, &content),
-        None => Err(LegionError::NoReflectionInput),
-    }
+    let content = extract_last_assistant_message(transcript_path)?;
+    reflect_from_text(db, index, repo, &content)
 }
 
 #[cfg(test)]
