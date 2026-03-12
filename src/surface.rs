@@ -1,5 +1,6 @@
 use crate::db::{self, Database, Reflection};
 use crate::error::Result;
+use crate::task;
 
 /// Truncate text to a maximum number of characters, adding "..." if truncated.
 fn truncate_text(text: &str, max_chars: usize) -> String {
@@ -18,6 +19,7 @@ pub struct SurfaceResult {
     pub recent_posts: Vec<Reflection>,
     pub high_value: Vec<Reflection>,
     pub chain_extensions: Vec<Reflection>,
+    pub pending_tasks: Vec<task::Task>,
 }
 
 const MAX_RECENT_POSTS: usize = 5;
@@ -33,11 +35,13 @@ pub fn surface(db: &Database, repo: &str) -> Result<SurfaceResult> {
     let high_value = db.get_high_value_cross_repo(repo, 3)?;
     let mut chain_extensions = db.get_recent_chain_extensions(24)?;
     chain_extensions.truncate(MAX_CHAIN_EXTENSIONS);
+    let pending_tasks = task::get_pending_inbound(db, repo)?;
 
     Ok(SurfaceResult {
         recent_posts,
         high_value,
         chain_extensions,
+        pending_tasks,
     })
 }
 
@@ -56,6 +60,7 @@ pub fn format_surface(result: &SurfaceResult, repo: &str) -> String {
     if result.recent_posts.is_empty()
         && result.high_value.is_empty()
         && result.chain_extensions.is_empty()
+        && result.pending_tasks.is_empty()
     {
         return String::new();
     }
@@ -101,6 +106,10 @@ pub fn format_surface(result: &SurfaceResult, repo: &str) -> String {
             "- Chain extended: {}{} (latest: \"{}{}\")\n",
             c.repo, domain_tag, truncated, ellipsis
         ));
+    }
+
+    if !result.pending_tasks.is_empty() {
+        output.push_str(&task::format_pending_for_surface(&result.pending_tasks));
     }
 
     output
@@ -183,9 +192,41 @@ mod tests {
             recent_posts: vec![],
             high_value: vec![],
             chain_extensions: vec![],
+            pending_tasks: vec![],
         };
         let output = format_surface(&result, "kelex");
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn surface_shows_pending_tasks() {
+        let (db, _index, _dir) = test_storage();
+        task::create_task(&db, "kelex", "legion", "implement search", None, "high")
+            .expect("create task");
+
+        let result = surface(&db, "legion").expect("surface");
+        assert_eq!(result.pending_tasks.len(), 1);
+        assert_eq!(result.pending_tasks[0].text, "implement search");
+    }
+
+    #[test]
+    fn surface_format_includes_pending_tasks() {
+        let (db, _index, _dir) = test_storage();
+        task::create_task(
+            &db,
+            "kelex",
+            "legion",
+            "implement search",
+            Some("BM25 index"),
+            "high",
+        )
+        .expect("create task");
+
+        let result = surface(&db, "legion").expect("surface");
+        let output = format_surface(&result, "legion");
+        assert!(output.contains("Task from kelex"));
+        assert!(output.contains("implement search"));
+        assert!(output.contains("[high]"));
     }
 
     #[test]

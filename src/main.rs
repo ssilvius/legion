@@ -9,6 +9,7 @@ mod search;
 mod signal;
 mod stats;
 mod surface;
+mod task;
 #[cfg(test)]
 mod testutil;
 
@@ -211,6 +212,85 @@ enum Commands {
         /// Repository name (omit for all repos)
         #[arg(long)]
         repo: Option<String>,
+    },
+
+    /// Manage delegated tasks between agents
+    Task {
+        #[command(subcommand)]
+        action: TaskAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum TaskAction {
+    /// Create a new task for another agent
+    Create {
+        /// Sender repository name
+        #[arg(long)]
+        from: String,
+
+        /// Target repository name
+        #[arg(long)]
+        to: String,
+
+        /// Task description
+        #[arg(long)]
+        text: String,
+
+        /// Additional context for the task
+        #[arg(long)]
+        context: Option<String>,
+
+        /// Priority: low, med, high (default: med)
+        #[arg(long, default_value = "med", value_parser = ["low", "med", "high"])]
+        priority: String,
+    },
+
+    /// List tasks for a repo
+    List {
+        /// Repository name
+        #[arg(long)]
+        repo: String,
+
+        /// Show outbound tasks (tasks created by this repo) instead of inbound
+        #[arg(long)]
+        from: bool,
+    },
+
+    /// Accept a pending task
+    Accept {
+        /// Task ID
+        #[arg(long)]
+        id: String,
+    },
+
+    /// Mark an accepted task as done
+    Done {
+        /// Task ID
+        #[arg(long)]
+        id: String,
+
+        /// Completion note
+        #[arg(long)]
+        note: Option<String>,
+    },
+
+    /// Block an accepted task
+    Block {
+        /// Task ID
+        #[arg(long)]
+        id: String,
+
+        /// Reason for blocking
+        #[arg(long)]
+        reason: Option<String>,
+    },
+
+    /// Unblock a blocked task (returns to accepted)
+    Unblock {
+        /// Task ID
+        #[arg(long)]
+        id: String,
     },
 }
 
@@ -591,6 +671,60 @@ fn main() -> error::Result<()> {
             let base = data_dir()?;
             let database = db::Database::open(&base.join("legion.db"))?;
             stats::stats(&database, repo.as_deref())?;
+        }
+        Commands::Task { action } => {
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+
+            match action {
+                TaskAction::Create {
+                    from,
+                    to,
+                    text,
+                    context,
+                    priority,
+                } => {
+                    let id = task::create_task(
+                        &database,
+                        &from,
+                        &to,
+                        &text,
+                        context.as_deref(),
+                        &priority,
+                    )?;
+                    eprintln!("[legion] task created: {} -> {} ({})", from, to, id);
+                }
+                TaskAction::List { repo, from } => {
+                    let direction = if from {
+                        task::Direction::Outbound
+                    } else {
+                        task::Direction::Inbound
+                    };
+                    let tasks = task::list_tasks(&database, &repo, direction)?;
+                    let output = task::format_task_list(&tasks, &repo, direction);
+                    if output.is_empty() {
+                        eprintln!("[legion] no tasks found");
+                    } else {
+                        print!("{output}");
+                    }
+                }
+                TaskAction::Accept { id } => {
+                    task::accept_task(&database, &id)?;
+                    eprintln!("[legion] task accepted: {}", id);
+                }
+                TaskAction::Done { id, note } => {
+                    task::complete_task(&database, &id, note.as_deref())?;
+                    eprintln!("[legion] task completed: {}", id);
+                }
+                TaskAction::Block { id, reason } => {
+                    task::block_task(&database, &id, reason.as_deref())?;
+                    eprintln!("[legion] task blocked: {}", id);
+                }
+                TaskAction::Unblock { id } => {
+                    task::unblock_task(&database, &id)?;
+                    eprintln!("[legion] task unblocked: {}", id);
+                }
+            }
         }
     }
 
