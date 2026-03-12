@@ -61,7 +61,7 @@ pub fn post_from_transcript_with_meta(
 
 /// Bullpen post filter mode.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum BoardFilter {
+pub enum BullpenFilter {
     All,
     SignalsOnly,
     MusingsOnly,
@@ -86,20 +86,20 @@ pub fn bullpen(db: &Database, reader_repo: &str) -> Result<Vec<Reflection>> {
 pub fn bullpen_filtered(
     db: &Database,
     reader_repo: &str,
-    filter: BoardFilter,
+    filter: BullpenFilter,
 ) -> Result<Vec<Reflection>> {
     let posts = db.get_board_posts()?;
 
     match filter {
-        BoardFilter::All => {
+        BullpenFilter::All => {
             db.mark_board_read(reader_repo)?;
             Ok(posts)
         }
-        BoardFilter::SignalsOnly => Ok(posts
+        BullpenFilter::SignalsOnly => Ok(posts
             .into_iter()
             .filter(|p| signal::is_signal(&p.text))
             .collect()),
-        BoardFilter::MusingsOnly => Ok(posts
+        BullpenFilter::MusingsOnly => Ok(posts
             .into_iter()
             .filter(|p| !signal::is_signal(&p.text))
             .collect()),
@@ -306,7 +306,7 @@ mod tests {
 
         // Filtered view should NOT mark as read
         let _signals =
-            bullpen_filtered(&db, "platform", BoardFilter::SignalsOnly).expect("signals");
+            bullpen_filtered(&db, "platform", BullpenFilter::SignalsOnly).expect("signals");
         assert_eq!(
             db.get_unread_count("platform").expect("still unread"),
             2,
@@ -314,7 +314,7 @@ mod tests {
         );
 
         // Unfiltered view SHOULD mark as read
-        let _all = bullpen_filtered(&db, "platform", BoardFilter::All).expect("all");
+        let _all = bullpen_filtered(&db, "platform", BullpenFilter::All).expect("all");
         assert_eq!(
             db.get_unread_count("platform").expect("now read"),
             0,

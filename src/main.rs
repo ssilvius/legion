@@ -93,7 +93,7 @@ enum Commands {
         force: bool,
     },
 
-    /// Post a message to the shared board for other agents
+    /// Post a message to the shared bullpen for other agents
     Post {
         /// Repository name(s), comma-separated (e.g., "kelex" or "platform,legion")
         #[arg(long, value_delimiter = ',', required = true)]
@@ -543,11 +543,11 @@ fn main() -> error::Result<()> {
                 }
             } else {
                 let filter = if signals {
-                    board::BoardFilter::SignalsOnly
+                    board::BullpenFilter::SignalsOnly
                 } else if musings {
-                    board::BoardFilter::MusingsOnly
+                    board::BullpenFilter::MusingsOnly
                 } else {
-                    board::BoardFilter::All
+                    board::BullpenFilter::All
                 };
                 let posts = board::bullpen_filtered(&database, &repo, filter)?;
                 let output = board::format_bullpen(&posts);
