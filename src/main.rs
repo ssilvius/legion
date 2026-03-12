@@ -242,7 +242,7 @@ enum TaskAction {
         context: Option<String>,
 
         /// Priority: low, med, high (default: med)
-        #[arg(long, default_value = "med")]
+        #[arg(long, default_value = "med", value_parser = ["low", "med", "high"])]
         priority: String,
     },
 
@@ -284,6 +284,13 @@ enum TaskAction {
         /// Reason for blocking
         #[arg(long)]
         reason: Option<String>,
+    },
+
+    /// Unblock a blocked task (returns to accepted)
+    Unblock {
+        /// Task ID
+        #[arg(long)]
+        id: String,
     },
 }
 
@@ -712,6 +719,10 @@ fn main() -> error::Result<()> {
                 TaskAction::Block { id, reason } => {
                     task::block_task(&database, &id, reason.as_deref())?;
                     eprintln!("[legion] task blocked: {}", id);
+                }
+                TaskAction::Unblock { id } => {
+                    task::unblock_task(&database, &id)?;
+                    eprintln!("[legion] task unblocked: {}", id);
                 }
             }
         }

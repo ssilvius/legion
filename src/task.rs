@@ -102,6 +102,11 @@ pub fn block_task(db: &Database, id: &str, reason: Option<&str>) -> Result<()> {
     transition_task(db, id, "block", "accepted", "blocked", reason)
 }
 
+/// Unblock a blocked task (blocked -> accepted).
+pub fn unblock_task(db: &Database, id: &str) -> Result<()> {
+    transition_task(db, id, "unblock", "blocked", "accepted", None)
+}
+
 /// Format a priority tag for display. Returns " [high]" or " [low]",
 /// or an empty string for the default "med" priority.
 fn priority_tag(priority: &str) -> String {

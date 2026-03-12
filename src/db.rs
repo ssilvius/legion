@@ -580,12 +580,17 @@ impl Database {
     }
 
     /// Update a task's status and optional note. Sets updated_at to now.
+    ///
+    /// Returns an error if no task with the given ID exists.
     pub fn update_task_status(&self, id: &str, status: &str, note: Option<&str>) -> Result<()> {
         let now = Utc::now().to_rfc3339();
-        self.conn.execute(
+        let rows = self.conn.execute(
             "UPDATE tasks SET status = ?1, note = COALESCE(?2, note), updated_at = ?3 WHERE id = ?4",
             rusqlite::params![status, &note, &now, id],
         )?;
+        if rows == 0 {
+            return Err(LegionError::TaskNotFound(id.to_string()));
+        }
         Ok(())
     }
 
