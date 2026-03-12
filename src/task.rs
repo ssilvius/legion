@@ -61,52 +61,55 @@ pub fn list_tasks(db: &Database, repo: &str, direction: Direction) -> Result<Vec
     db.get_tasks(repo, direction)
 }
 
-/// Accept a pending task (pending -> accepted).
-pub fn accept_task(db: &Database, id: &str) -> Result<()> {
+/// Transition a task from an expected status to a new status.
+///
+/// Returns an error if the task does not exist or its current status
+/// does not match `expected_status`.
+fn transition_task(
+    db: &Database,
+    id: &str,
+    action: &str,
+    expected_status: &str,
+    new_status: &str,
+    note: Option<&str>,
+) -> Result<()> {
     let task = db
         .get_task_by_id(id)?
         .ok_or_else(|| LegionError::TaskNotFound(id.to_string()))?;
 
-    if task.status != "pending" {
+    if task.status != expected_status {
         return Err(LegionError::InvalidTaskTransition {
-            action: "accept".to_string(),
+            action: action.to_string(),
             current: task.status,
         });
     }
 
-    db.update_task_status(id, "accepted", None)
+    db.update_task_status(id, new_status, note)
+}
+
+/// Accept a pending task (pending -> accepted).
+pub fn accept_task(db: &Database, id: &str) -> Result<()> {
+    transition_task(db, id, "accept", "pending", "accepted", None)
 }
 
 /// Complete an accepted task (accepted -> done), with optional note.
 pub fn complete_task(db: &Database, id: &str, note: Option<&str>) -> Result<()> {
-    let task = db
-        .get_task_by_id(id)?
-        .ok_or_else(|| LegionError::TaskNotFound(id.to_string()))?;
-
-    if task.status != "accepted" {
-        return Err(LegionError::InvalidTaskTransition {
-            action: "complete".to_string(),
-            current: task.status,
-        });
-    }
-
-    db.update_task_status(id, "done", note)
+    transition_task(db, id, "complete", "accepted", "done", note)
 }
 
 /// Block an accepted task (accepted -> blocked), with reason.
 pub fn block_task(db: &Database, id: &str, reason: Option<&str>) -> Result<()> {
-    let task = db
-        .get_task_by_id(id)?
-        .ok_or_else(|| LegionError::TaskNotFound(id.to_string()))?;
+    transition_task(db, id, "block", "accepted", "blocked", reason)
+}
 
-    if task.status != "accepted" {
-        return Err(LegionError::InvalidTaskTransition {
-            action: "block".to_string(),
-            current: task.status,
-        });
+/// Format a priority tag for display. Returns " [high]" or " [low]",
+/// or an empty string for the default "med" priority.
+fn priority_tag(priority: &str) -> String {
+    if priority != "med" {
+        format!(" [{}]", priority)
+    } else {
+        String::new()
     }
-
-    db.update_task_status(id, "blocked", reason)
 }
 
 /// Get pending inbound tasks for a repo (used by surface).
@@ -133,11 +136,7 @@ pub fn format_task_list(tasks: &[Task], repo: &str, direction: Direction) -> Str
     );
 
     for t in tasks {
-        let priority_tag = if t.priority != "med" {
-            format!(" [{}]", t.priority)
-        } else {
-            String::new()
-        };
+        let prio = priority_tag(&t.priority);
         let peer = match direction {
             Direction::Inbound => format!("from:{}", t.from_repo),
             Direction::Outbound => format!("to:{}", t.to_repo),
@@ -150,7 +149,7 @@ pub fn format_task_list(tasks: &[Task], repo: &str, direction: Direction) -> Str
         let date = crate::db::format_date(&t.created_at);
         output.push_str(&format!(
             "- [{}] {}{} ({}, {}{}) {}\n",
-            t.status, t.text, priority_tag, peer, date, note_part, t.id
+            t.status, t.text, prio, peer, date, note_part, t.id
         ));
     }
 
@@ -161,23 +160,19 @@ pub fn format_task_list(tasks: &[Task], repo: &str, direction: Direction) -> Str
 pub fn format_pending_for_surface(tasks: &[Task]) -> String {
     let mut output = String::new();
     for t in tasks {
-        let priority_tag = if t.priority != "med" {
-            format!(" [{}]", t.priority)
-        } else {
-            String::new()
-        };
+        let prio = priority_tag(&t.priority);
         let context_part = t
             .context
             .as_deref()
             .map(|c| {
                 let truncated: String = c.chars().take(60).collect();
-                let ellipsis = if c.len() > 60 { "..." } else { "" };
+                let ellipsis = if c.chars().count() > 60 { "..." } else { "" };
                 format!(" (context: {}{})", truncated, ellipsis)
             })
             .unwrap_or_default();
         output.push_str(&format!(
             "- Task from {}: \"{}\"{}{}\n",
-            t.from_repo, t.text, priority_tag, context_part
+            t.from_repo, t.text, prio, context_part
         ));
     }
     output
