@@ -164,6 +164,24 @@ impl Database {
             conn.execute_batch("ALTER TABLE reflections ADD COLUMN parent_id TEXT;")?;
         }
 
+        // Migration 3: Tasks table for agent delegation.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS tasks (
+                id TEXT PRIMARY KEY,
+                from_repo TEXT NOT NULL,
+                to_repo TEXT NOT NULL,
+                text TEXT NOT NULL,
+                context TEXT,
+                priority TEXT NOT NULL DEFAULT 'med',
+                status TEXT NOT NULL DEFAULT 'pending',
+                note TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_tasks_to ON tasks(to_repo, status);
+            CREATE INDEX IF NOT EXISTS idx_tasks_from ON tasks(from_repo, status);",
+        )?;
+
         Ok(())
     }
 
@@ -498,6 +516,86 @@ impl Database {
              FROM reflections WHERE repo != ?1 AND recall_count > 0 ORDER BY recall_count DESC LIMIT ?2",
         )?;
         let rows = stmt.query_map(rusqlite::params![exclude_repo, limit], map_reflection_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
+    // --- Task CRUD ---
+
+    /// Insert a new task and return its UUIDv7 ID.
+    pub fn insert_task(
+        &self,
+        from_repo: &str,
+        to_repo: &str,
+        text: &str,
+        context: Option<&str>,
+        priority: &str,
+    ) -> Result<String> {
+        let id = Uuid::now_v7().to_string();
+        let now = Utc::now().to_rfc3339();
+
+        self.conn.execute(
+            "INSERT INTO tasks (id, from_repo, to_repo, text, context, priority, status, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7, ?7)",
+            rusqlite::params![&id, from_repo, to_repo, text, &context, priority, &now],
+        )?;
+
+        Ok(id)
+    }
+
+    /// Retrieve a single task by ID.
+    pub fn get_task_by_id(&self, id: &str) -> Result<Option<crate::task::Task>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, from_repo, to_repo, text, context, priority, status, note, created_at, updated_at \
+             FROM tasks WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map([id], crate::task::map_task_row)?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    /// List tasks for a repo filtered by direction (inbound or outbound).
+    pub fn get_tasks(
+        &self,
+        repo: &str,
+        direction: crate::task::Direction,
+    ) -> Result<Vec<crate::task::Task>> {
+        let sql = match direction {
+            crate::task::Direction::Inbound => {
+                "SELECT id, from_repo, to_repo, text, context, priority, status, note, created_at, updated_at \
+                 FROM tasks WHERE to_repo = ?1 ORDER BY created_at DESC"
+            }
+            crate::task::Direction::Outbound => {
+                "SELECT id, from_repo, to_repo, text, context, priority, status, note, created_at, updated_at \
+                 FROM tasks WHERE from_repo = ?1 ORDER BY created_at DESC"
+            }
+        };
+
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map([repo], crate::task::map_task_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
+    /// Update a task's status and optional note. Sets updated_at to now.
+    pub fn update_task_status(&self, id: &str, status: &str, note: Option<&str>) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.conn.execute(
+            "UPDATE tasks SET status = ?1, note = COALESCE(?2, note), updated_at = ?3 WHERE id = ?4",
+            rusqlite::params![status, &note, &now, id],
+        )?;
+        Ok(())
+    }
+
+    /// Get pending tasks assigned to a repo (for surface output).
+    pub fn get_pending_tasks_for_repo(&self, repo: &str) -> Result<Vec<crate::task::Task>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, from_repo, to_repo, text, context, priority, status, note, created_at, updated_at \
+             FROM tasks WHERE to_repo = ?1 AND status = 'pending' ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([repo], crate::task::map_task_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(LegionError::Database)
     }

@@ -937,3 +937,332 @@ fn bullpen_signals_filter() {
         "expected no signals in --musings, got: {stdout}"
     );
 }
+
+#[test]
+fn task_full_lifecycle() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Create a task
+    let out = legion_cmd(dir.path())
+        .args([
+            "task",
+            "create",
+            "--from",
+            "kelex",
+            "--to",
+            "legion",
+            "--text",
+            "implement search feature",
+            "--priority",
+            "high",
+            "--context",
+            "BM25 index needed",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "task create failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("task created: kelex -> legion"),
+        "expected create confirmation, got: {stderr}"
+    );
+    // Extract task ID from output
+    let task_id = stderr
+        .lines()
+        .next()
+        .unwrap_or("")
+        .rsplit('(')
+        .next()
+        .unwrap()
+        .trim_end_matches(')')
+        .to_string();
+
+    // List inbound tasks for legion
+    let out = legion_cmd(dir.path())
+        .args(["task", "list", "--repo", "legion"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.contains("implement search feature"),
+        "expected task text in list, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("[pending]"),
+        "expected pending status, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("from:kelex"),
+        "expected from attribution, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("[high]"),
+        "expected high priority, got: {stdout}"
+    );
+
+    // Accept the task
+    let out = legion_cmd(dir.path())
+        .args(["task", "accept", "--id", &task_id])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "task accept failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("task accepted"),
+        "expected accept confirmation, got: {stderr}"
+    );
+
+    // Complete the task
+    let out = legion_cmd(dir.path())
+        .args([
+            "task",
+            "done",
+            "--id",
+            &task_id,
+            "--note",
+            "shipped in v0.2",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "task done failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("task completed"),
+        "expected completion confirmation, got: {stderr}"
+    );
+
+    // List should show done status
+    let out = legion_cmd(dir.path())
+        .args(["task", "list", "--repo", "legion"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.contains("[done]"),
+        "expected done status, got: {stdout}"
+    );
+}
+
+#[test]
+fn task_block_flow() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Create and accept
+    let out = legion_cmd(dir.path())
+        .args([
+            "task",
+            "create",
+            "--from",
+            "kelex",
+            "--to",
+            "legion",
+            "--text",
+            "blocked task",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let task_id = stderr
+        .lines()
+        .next()
+        .unwrap_or("")
+        .rsplit('(')
+        .next()
+        .unwrap()
+        .trim_end_matches(')')
+        .to_string();
+
+    let out = legion_cmd(dir.path())
+        .args(["task", "accept", "--id", &task_id])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    // Block the task
+    let out = legion_cmd(dir.path())
+        .args([
+            "task",
+            "block",
+            "--id",
+            &task_id,
+            "--reason",
+            "waiting on upstream",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "task block failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("task blocked"),
+        "expected block confirmation, got: {stderr}"
+    );
+}
+
+#[test]
+fn task_list_outbound() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Create tasks from kelex
+    let out = legion_cmd(dir.path())
+        .args([
+            "task",
+            "create",
+            "--from",
+            "kelex",
+            "--to",
+            "legion",
+            "--text",
+            "task for legion",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "task",
+            "create",
+            "--from",
+            "kelex",
+            "--to",
+            "rafters",
+            "--text",
+            "task for rafters",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    // List outbound from kelex
+    let out = legion_cmd(dir.path())
+        .args(["task", "list", "--repo", "kelex", "--from"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.contains("task for legion"),
+        "expected legion task, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("task for rafters"),
+        "expected rafters task, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("outbound"),
+        "expected outbound label, got: {stdout}"
+    );
+}
+
+#[test]
+fn task_invalid_state_transition() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Create a task
+    let out = legion_cmd(dir.path())
+        .args([
+            "task",
+            "create",
+            "--from",
+            "kelex",
+            "--to",
+            "legion",
+            "--text",
+            "cannot skip accept",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let task_id = stderr
+        .lines()
+        .next()
+        .unwrap_or("")
+        .rsplit('(')
+        .next()
+        .unwrap()
+        .trim_end_matches(')')
+        .to_string();
+
+    // Try to complete a pending task (should fail)
+    let out = legion_cmd(dir.path())
+        .args(["task", "done", "--id", &task_id])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "completing a pending task should fail"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("InvalidTaskTransition"),
+        "expected state transition error, got: {stderr}"
+    );
+}
+
+#[test]
+fn task_surface_shows_pending() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Need to init DB first
+    let out = legion_cmd(dir.path())
+        .args(["reflect", "--repo", "test", "--text", "setup"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    // Create a pending task for legion
+    let out = legion_cmd(dir.path())
+        .args([
+            "task",
+            "create",
+            "--from",
+            "kelex",
+            "--to",
+            "legion",
+            "--text",
+            "pending task for surface",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    // Surface should show the pending task
+    let output = legion_cmd(dir.path())
+        .args(["surface", "--repo", "legion"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "surface failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("pending task for surface"),
+        "expected pending task in surface, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("Task from kelex"),
+        "expected task attribution, got: {stdout}"
+    );
+}

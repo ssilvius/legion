@@ -26,6 +26,12 @@ legion chain --id <reflection-id>
 legion surface --repo <name>
 legion stats --repo <name>
 legion reindex
+legion task create --from <repo> --to <repo> --text "task description" --priority <low|med|high> --context "optional context"
+legion task list --repo <name>               # inbound tasks (assigned to repo)
+legion task list --repo <name> --from        # outbound tasks (created by repo)
+legion task accept --id <task-id>
+legion task done --id <task-id> --note "optional completion note"
+legion task block --id <task-id> --reason "optional reason"
 ```
 
 ### Cross-Agent Consultation
@@ -80,6 +86,23 @@ CREATE INDEX idx_reflections_repo ON reflections(repo);
 CREATE INDEX idx_reflections_created ON reflections(created_at);
 ```
 
+### Tasks (Agent Delegation)
+
+Delegate work between agents with state-tracked tasks:
+
+```bash
+legion task create --from kelex --to legion --text "implement BM25 search" --priority high
+legion task list --repo legion              # see inbound tasks
+legion task list --repo kelex --from        # see outbound tasks
+legion task accept --id <task-id>
+legion task done --id <task-id> --note "shipped"
+legion task block --id <task-id> --reason "waiting on upstream"
+legion task unblock --id <task-id>
+```
+
+State transitions: pending -> accepted -> done|blocked. Blocked -> accepted via unblock. Invalid transitions are rejected.
+Pending inbound tasks are included in `legion surface` output.
+
 ### Bullpen (Push-Based Communication)
 
 Push something to the team instead of keeping it to yourself:
@@ -128,6 +151,7 @@ Legion is called by Claude Code hooks:
 - `signal` is agent-initiated (structured coordination: reviews, requests, announcements)
 - `boost` is agent-initiated (after recalling and successfully applying a reflection)
 - `chain` is agent-initiated (to trace a learning chain)
+- `task` is agent-initiated (delegate work to other agents, check task status)
 
 ## Project Layout
 
@@ -141,6 +165,7 @@ src/
   board.rs         -- Bullpen: post, bullpen, and bullpen filtering
   signal.rs        -- Signal parsing, formatting, and detection
   surface.rs       -- Cross-repo highlight surfacing
+  task.rs          -- Task delegation between agents
   stats.rs         -- Reflection statistics reporting
   init.rs          -- Hook script generation and settings.json management
   error.rs         -- Error types

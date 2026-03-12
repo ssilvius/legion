@@ -35,6 +35,12 @@ pub enum LegionError {
 
     #[error("embedding error: {0}")]
     Embedding(String),
+
+    #[error("task not found: {0}")]
+    TaskNotFound(String),
+
+    #[error("invalid state transition: cannot {action} a task with status '{current}'")]
+    InvalidTaskTransition { action: String, current: String },
 }
 
 pub type Result<T> = std::result::Result<T, LegionError>;
