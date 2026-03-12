@@ -6,16 +6,16 @@ use crate::reflect;
 use crate::search::SearchIndex;
 use crate::signal;
 
-/// Store a board post from direct text input.
+/// Store a bullpen post from direct text input.
 ///
 /// Like `reflect_from_text` but sets audience to "team" so the post
-/// appears on the shared board visible to all agents.
+/// appears on the shared bullpen visible to all agents.
 #[allow(dead_code)]
 pub fn post_from_text(db: &Database, index: &SearchIndex, repo: &str, text: &str) -> Result<()> {
     post_from_text_with_meta(db, index, repo, text, &ReflectionMeta::default())
 }
 
-/// Extract and store a board post from a transcript JSONL file.
+/// Extract and store a bullpen post from a transcript JSONL file.
 #[allow(dead_code)]
 pub fn post_from_transcript(
     db: &Database,
@@ -26,7 +26,7 @@ pub fn post_from_transcript(
     post_from_transcript_with_meta(db, index, repo, transcript_path, &ReflectionMeta::default())
 }
 
-/// Store a board post from text with Synapse metadata.
+/// Store a bullpen post from text with Synapse metadata.
 pub fn post_from_text_with_meta(
     db: &Database,
     index: &SearchIndex,
@@ -42,12 +42,12 @@ pub fn post_from_text_with_meta(
     let reflection = db.insert_reflection_with_meta(repo, trimmed, "team", meta)?;
     index.add(&reflection.id, repo, trimmed)?;
 
-    eprintln!("posted to board for {} ({})", repo, reflection.id);
+    eprintln!("posted to bullpen for {} ({})", repo, reflection.id);
 
     Ok(())
 }
 
-/// Extract and store a board post from a transcript with Synapse metadata.
+/// Extract and store a bullpen post from a transcript with Synapse metadata.
 pub fn post_from_transcript_with_meta(
     db: &Database,
     index: &SearchIndex,
@@ -59,68 +59,68 @@ pub fn post_from_transcript_with_meta(
     post_from_text_with_meta(db, index, repo, &content, meta)
 }
 
-/// Board post filter mode.
+/// Bullpen post filter mode.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum BoardFilter {
+pub enum BullpenFilter {
     All,
     SignalsOnly,
     MusingsOnly,
 }
 
-/// Retrieve all board posts and mark them as read for the given reader repo.
+/// Retrieve all bullpen posts and mark them as read for the given reader repo.
 ///
-/// Returns the posts before marking, so the caller sees the full board
+/// Returns the posts before marking, so the caller sees the full bullpen
 /// including any previously unread posts.
 #[allow(dead_code)]
-pub fn board(db: &Database, reader_repo: &str) -> Result<Vec<Reflection>> {
+pub fn bullpen(db: &Database, reader_repo: &str) -> Result<Vec<Reflection>> {
     let posts = db.get_board_posts()?;
     db.mark_board_read(reader_repo)?;
     Ok(posts)
 }
 
-/// Retrieve board posts filtered by type.
+/// Retrieve bullpen posts filtered by type.
 ///
 /// Only marks posts as read when viewing All (unfiltered). Filtered views
 /// (signals-only, musings-only) do not mark anything as read, since the
-/// reader has not seen the full board.
-pub fn board_filtered(
+/// reader has not seen the full bullpen.
+pub fn bullpen_filtered(
     db: &Database,
     reader_repo: &str,
-    filter: BoardFilter,
+    filter: BullpenFilter,
 ) -> Result<Vec<Reflection>> {
     let posts = db.get_board_posts()?;
 
     match filter {
-        BoardFilter::All => {
+        BullpenFilter::All => {
             db.mark_board_read(reader_repo)?;
             Ok(posts)
         }
-        BoardFilter::SignalsOnly => Ok(posts
+        BullpenFilter::SignalsOnly => Ok(posts
             .into_iter()
             .filter(|p| signal::is_signal(&p.text))
             .collect()),
-        BoardFilter::MusingsOnly => Ok(posts
+        BullpenFilter::MusingsOnly => Ok(posts
             .into_iter()
             .filter(|p| !signal::is_signal(&p.text))
             .collect()),
     }
 }
 
-/// Return the count of unread board posts for the given reader repo.
-pub fn board_count(db: &Database, reader_repo: &str) -> Result<u64> {
+/// Return the count of unread bullpen posts for the given reader repo.
+pub fn bullpen_count(db: &Database, reader_repo: &str) -> Result<u64> {
     db.get_unread_count(reader_repo)
 }
 
-/// Format board posts for display.
+/// Format bullpen posts for display.
 ///
 /// Signals are rendered as compact one-liners. Musings get full text.
 /// Returns an empty string when there are no posts.
-pub fn format_board(posts: &[Reflection]) -> String {
+pub fn format_bullpen(posts: &[Reflection]) -> String {
     if posts.is_empty() {
         return String::new();
     }
 
-    let mut output = format!("[Legion] Board ({} posts):\n", posts.len());
+    let mut output = format!("[Legion] Bullpen ({} posts):\n", posts.len());
 
     for p in posts {
         let date = db::format_date(&p.created_at);
@@ -137,16 +137,16 @@ pub fn format_board(posts: &[Reflection]) -> String {
     output
 }
 
-/// Format unread board count for display.
+/// Format unread bullpen count for display.
 ///
-/// Returns a message like "3 unread posts on the board" when count > 0.
+/// Returns a message like "3 unread posts on the bullpen" when count > 0.
 /// Returns an empty string when count is 0 (no noise for hooks).
-pub fn format_board_count(count: u64) -> String {
+pub fn format_bullpen_count(count: u64) -> String {
     if count == 0 {
         return String::new();
     }
 
-    format!("{} unread posts on the board", count)
+    format!("{} unread posts on the bullpen", count)
 }
 
 #[cfg(test)]
@@ -184,30 +184,30 @@ mod tests {
     }
 
     #[test]
-    fn board_returns_only_posts_not_reflections() {
+    fn bullpen_returns_only_posts_not_reflections() {
         let (db, index, _dir) = test_storage();
 
         // Store a private reflection
         crate::reflect::reflect_from_text(&db, &index, "kelex", "private thought")
             .expect("reflect");
 
-        // Store a board post
+        // Store a bullpen post
         post_from_text(&db, &index, "rafters", "shared thought").expect("post");
 
-        let posts = board(&db, "platform").expect("board");
+        let posts = bullpen(&db, "platform").expect("bullpen");
         assert_eq!(posts.len(), 1);
         assert_eq!(posts[0].text, "shared thought");
         assert_eq!(posts[0].audience, "team");
     }
 
     #[test]
-    fn board_marks_as_read() {
+    fn bullpen_marks_as_read() {
         let (db, index, _dir) = test_storage();
         post_from_text(&db, &index, "kelex", "a post").expect("post");
 
         assert_eq!(db.get_unread_count("platform").expect("count"), 1);
 
-        let _posts = board(&db, "platform").expect("board");
+        let _posts = bullpen(&db, "platform").expect("bullpen");
 
         assert_eq!(
             db.get_unread_count("platform").expect("count after read"),
@@ -216,17 +216,17 @@ mod tests {
     }
 
     #[test]
-    fn board_count_returns_unread_count() {
+    fn bullpen_count_returns_unread_count() {
         let (db, index, _dir) = test_storage();
         post_from_text(&db, &index, "kelex", "post one").expect("post 1");
         post_from_text(&db, &index, "rafters", "post two").expect("post 2");
 
-        let count = board_count(&db, "platform").expect("count");
+        let count = bullpen_count(&db, "platform").expect("count");
         assert_eq!(count, 2);
     }
 
     #[test]
-    fn format_board_shows_repo_attribution() {
+    fn format_bullpen_shows_repo_attribution() {
         let posts = vec![
             Reflection {
                 id: "id-1".into(),
@@ -254,8 +254,8 @@ mod tests {
             },
         ];
 
-        let output = format_board(&posts);
-        assert!(output.contains("[Legion] Board (2 posts):"));
+        let output = format_bullpen(&posts);
+        assert!(output.contains("[Legion] Bullpen (2 posts):"));
         assert!(output.contains("[kelex]"));
         assert!(output.contains("[rafters]"));
         assert!(output.contains("shared insight"));
@@ -265,21 +265,21 @@ mod tests {
     }
 
     #[test]
-    fn format_board_empty_returns_empty_string() {
-        let output = format_board(&[]);
+    fn format_bullpen_empty_returns_empty_string() {
+        let output = format_bullpen(&[]);
         assert!(output.is_empty());
     }
 
     #[test]
-    fn format_board_count_zero_is_empty_string() {
-        let output = format_board_count(0);
+    fn format_bullpen_count_zero_is_empty_string() {
+        let output = format_bullpen_count(0);
         assert!(output.is_empty());
     }
 
     #[test]
-    fn format_board_count_nonzero_shows_message() {
-        let output = format_board_count(3);
-        assert_eq!(output, "3 unread posts on the board");
+    fn format_bullpen_count_nonzero_shows_message() {
+        let output = format_bullpen_count(3);
+        assert_eq!(output, "3 unread posts on the bullpen");
     }
 
     #[test]
@@ -305,7 +305,8 @@ mod tests {
         assert_eq!(db.get_unread_count("platform").expect("count"), 2);
 
         // Filtered view should NOT mark as read
-        let _signals = board_filtered(&db, "platform", BoardFilter::SignalsOnly).expect("signals");
+        let _signals =
+            bullpen_filtered(&db, "platform", BullpenFilter::SignalsOnly).expect("signals");
         assert_eq!(
             db.get_unread_count("platform").expect("still unread"),
             2,
@@ -313,7 +314,7 @@ mod tests {
         );
 
         // Unfiltered view SHOULD mark as read
-        let _all = board_filtered(&db, "platform", BoardFilter::All).expect("all");
+        let _all = bullpen_filtered(&db, "platform", BullpenFilter::All).expect("all");
         assert_eq!(
             db.get_unread_count("platform").expect("now read"),
             0,

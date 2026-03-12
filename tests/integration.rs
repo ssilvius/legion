@@ -317,7 +317,7 @@ fn cli_single_repo_still_works() {
 }
 
 #[test]
-fn post_and_board_roundtrip() {
+fn post_and_bullpen_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
 
     // Post a message
@@ -338,18 +338,18 @@ fn post_and_board_roundtrip() {
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("posted to board for kelex"),
+        stderr.contains("posted to bullpen for kelex"),
         "expected post confirmation, got: {stderr}"
     );
 
-    // Read the board from a different repo
+    // Read the bullpen from a different repo
     let output = legion_cmd(dir.path())
-        .args(["board", "--repo", "rafters"])
+        .args(["bullpen", "--repo", "rafters"])
         .output()
         .unwrap();
     assert!(
         output.status.success(),
-        "board failed: {}",
+        "bullpen failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
@@ -362,13 +362,13 @@ fn post_and_board_roundtrip() {
         "expected post text, got: {stdout}"
     );
     assert!(
-        stdout.contains("[Legion] Board"),
-        "expected board header, got: {stdout}"
+        stdout.contains("[Legion] Bullpen"),
+        "expected bullpen header, got: {stdout}"
     );
 }
 
 #[test]
-fn board_count_output() {
+fn bullpen_count_output() {
     let dir = tempfile::tempdir().unwrap();
 
     // Post two messages
@@ -390,32 +390,32 @@ fn board_count_output() {
         .unwrap();
     assert!(out.status.success());
 
-    // Check count from a reader that has not read the board
+    // Check count from a reader that has not read the bullpen
     let output = legion_cmd(dir.path())
-        .args(["board", "--repo", "platform", "--count"])
+        .args(["bullpen", "--repo", "platform", "--count"])
         .output()
         .unwrap();
     assert!(
         output.status.success(),
-        "board count failed: {}",
+        "bullpen count failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
-        stdout.contains("2 unread posts on the board"),
+        stdout.contains("2 unread posts on the bullpen"),
         "expected unread count, got: {stdout}"
     );
 
-    // Read the board to mark as read
+    // Read the bullpen to mark as read
     let out = legion_cmd(dir.path())
-        .args(["board", "--repo", "platform"])
+        .args(["bullpen", "--repo", "platform"])
         .output()
         .unwrap();
     assert!(out.status.success());
 
     // Count should now be zero (no output)
     let output = legion_cmd(dir.path())
-        .args(["board", "--repo", "platform", "--count"])
+        .args(["bullpen", "--repo", "platform", "--count"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -715,20 +715,20 @@ fn post_with_metadata_flags() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("posted to board for rafters"),
+        stderr.contains("posted to bullpen for rafters"),
         "expected post confirmation, got: {stderr}"
     );
 
-    // Verify it shows up on the board
+    // Verify it shows up on the bullpen
     let output = legion_cmd(dir.path())
-        .args(["board", "--repo", "kelex"])
+        .args(["bullpen", "--repo", "kelex"])
         .output()
         .unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
         stdout.contains("shared domain knowledge"),
-        "expected post on board, got: {stdout}"
+        "expected post on bullpen, got: {stdout}"
     );
 }
 
@@ -736,7 +736,7 @@ fn post_with_metadata_flags() {
 fn surface_shows_recent_posts() {
     let dir = tempfile::tempdir().unwrap();
 
-    // Post to the board
+    // Post to the bullpen
     let out = legion_cmd(dir.path())
         .args(["post", "--repo", "rafters", "--text", "synapse insight"])
         .output()
@@ -780,11 +780,45 @@ fn surface_empty_database() {
         .output()
         .unwrap();
     assert!(output.status.success());
-    // No board posts, no high-value, no chains -- should be empty
+    // No bullpen posts, no high-value, no chains -- should be empty
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
         stdout.is_empty(),
         "expected empty surface for no highlights, got: {stdout}"
+    );
+}
+
+#[test]
+fn bullpen_aliases_backward_compatible() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Seed a post
+    let out = legion_cmd(dir.path())
+        .args(["post", "--repo", "kelex", "--text", "alias test"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    // Old "board" alias still works
+    let output = legion_cmd(dir.path())
+        .args(["board", "--repo", "rafters"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "board alias should still work: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Short "bp" alias works
+    let output = legion_cmd(dir.path())
+        .args(["bp", "--repo", "rafters"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "bp alias should work: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
@@ -805,20 +839,20 @@ fn signal_command_posts_formatted_signal() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    // Verify signal appears on the board
+    // Verify signal appears on the bullpen
     let output = legion_cmd(dir.path())
-        .args(["board", "--repo", "platform"])
+        .args(["bullpen", "--repo", "platform"])
         .output()
         .unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
         stdout.contains("@legion"),
-        "expected signal recipient on board, got: {stdout}"
+        "expected signal recipient on bullpen, got: {stdout}"
     );
     assert!(
         stdout.contains("review"),
-        "expected signal verb on board, got: {stdout}"
+        "expected signal verb on bullpen, got: {stdout}"
     );
 }
 
@@ -850,7 +884,7 @@ fn signal_with_details() {
 }
 
 #[test]
-fn board_signals_filter() {
+fn bullpen_signals_filter() {
     let dir = tempfile::tempdir().unwrap();
 
     // Post a signal
@@ -876,7 +910,7 @@ fn board_signals_filter() {
 
     // --signals should show only the signal
     let output = legion_cmd(dir.path())
-        .args(["board", "--repo", "platform", "--signals"])
+        .args(["bullpen", "--repo", "platform", "--signals"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -889,7 +923,7 @@ fn board_signals_filter() {
 
     // --musings should show only the musing
     let output = legion_cmd(dir.path())
-        .args(["board", "--repo", "courses", "--musings"])
+        .args(["bullpen", "--repo", "courses", "--musings"])
         .output()
         .unwrap();
     assert!(output.status.success());

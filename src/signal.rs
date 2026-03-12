@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-/// A parsed signal from a board post.
+/// A parsed signal from a bullpen post.
 ///
 /// Signals follow the format: `@recipient verb:status {key: value, key: value}`
 /// The details block is optional. Multi-word values are supported.
@@ -13,12 +13,12 @@ pub struct Signal {
     pub trailing: Option<String>,
 }
 
-/// Check if a board post text is a signal (starts with @).
+/// Check if a bullpen post text is a signal (starts with @).
 pub fn is_signal(text: &str) -> bool {
     text.trim_start().starts_with('@')
 }
 
-/// Parse a signal from board post text.
+/// Parse a signal from bullpen post text.
 ///
 /// Format: `@recipient verb:status {key: value, key: value}`
 /// Also: `@recipient verb: free text after the verb`
@@ -85,7 +85,7 @@ pub fn parse_signal(text: &str) -> Option<Signal> {
     })
 }
 
-/// Format a signal for posting to the board.
+/// Format a signal for posting to the bullpen.
 ///
 /// Constructs the `@recipient verb:status {details}` format.
 pub fn format_signal(
@@ -117,7 +117,7 @@ pub fn format_signal(
     output
 }
 
-/// Format a signal compactly for board display (one-liner).
+/// Format a signal compactly for bullpen display (one-liner).
 pub fn format_signal_compact(signal: &Signal, repo: &str, date: &str) -> String {
     let status_part = signal
         .status

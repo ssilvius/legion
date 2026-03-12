@@ -27,7 +27,7 @@ if [ -z "$OUTPUT" ]; then
   OUTPUT=$(legion recall --repo "$REPO" --latest 2>/dev/null)
 fi
 
-# Surface cross-repo highlights (board posts, high-value reflections, chains)
+# Surface cross-repo highlights (bullpen posts, high-value reflections, chains)
 SURFACE=$(legion surface --repo "$REPO" 2>/dev/null)
 if [ -n "$SURFACE" ]; then
   if [ -n "$OUTPUT" ]; then
