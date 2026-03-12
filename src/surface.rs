@@ -25,7 +25,7 @@ const MAX_CHAIN_EXTENSIONS: usize = 3;
 
 /// Gather cross-repo highlights for a given repo.
 ///
-/// Returns up to 5 recent board posts, 3 high-value cross-repo reflections,
+/// Returns up to 5 recent bullpen posts, 3 high-value cross-repo reflections,
 /// and 3 recently extended learning chains.
 pub fn surface(db: &Database, repo: &str) -> Result<SurfaceResult> {
     let mut recent_posts = db.get_recent_board_posts(24)?;

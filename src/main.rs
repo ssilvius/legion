@@ -173,13 +173,14 @@ enum Commands {
         tags: Option<String>,
     },
 
-    /// Read the shared board or check for unread posts
-    Board {
+    /// Read the bullpen or check for unread posts
+    #[command(alias = "bp", alias = "board")]
+    Bullpen {
         /// Repository name (identifies who is reading)
         #[arg(long)]
         repo: String,
 
-        /// Only show unread count instead of full board
+        /// Only show unread count instead of full bullpen
         #[arg(long)]
         count: bool,
 
@@ -525,7 +526,7 @@ fn main() -> error::Result<()> {
                 }
             }
         }
-        Commands::Board {
+        Commands::Bullpen {
             repo,
             count,
             signals,
@@ -535,8 +536,8 @@ fn main() -> error::Result<()> {
             let database = db::Database::open(&base.join("legion.db"))?;
 
             if count {
-                let n = board::board_count(&database, &repo)?;
-                let output = board::format_board_count(n);
+                let n = board::bullpen_count(&database, &repo)?;
+                let output = board::format_bullpen_count(n);
                 if !output.is_empty() {
                     println!("{output}");
                 }
@@ -548,8 +549,8 @@ fn main() -> error::Result<()> {
                 } else {
                     board::BoardFilter::All
                 };
-                let posts = board::board_filtered(&database, &repo, filter)?;
-                let output = board::format_board(&posts);
+                let posts = board::bullpen_filtered(&database, &repo, filter)?;
+                let output = board::format_bullpen(&posts);
                 if !output.is_empty() {
                     print!("{output}");
                 }
