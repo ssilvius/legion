@@ -171,7 +171,7 @@ impl Database {
     ///
     /// Generates a UUIDv7 id and ISO 8601 timestamp automatically.
     /// The `audience` parameter controls visibility: "self" for private
-    /// reflections, "team" for board posts visible to all agents.
+    /// reflections, "team" for bullpen posts visible to all agents.
     #[allow(dead_code)]
     pub fn insert_reflection(&self, repo: &str, text: &str, audience: &str) -> Result<Reflection> {
         self.insert_reflection_with_meta(repo, text, audience, &ReflectionMeta::default())
@@ -383,7 +383,7 @@ impl Database {
             .map_err(LegionError::Database)
     }
 
-    /// Retrieve all board posts (audience = "team"), ordered newest first.
+    /// Retrieve all bullpen posts (audience = "team"), ordered newest first.
     pub fn get_board_posts(&self) -> Result<Vec<Reflection>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id FROM reflections WHERE audience = 'team' ORDER BY created_at DESC",
@@ -413,7 +413,7 @@ impl Database {
         Ok(count)
     }
 
-    /// Mark all current board posts as read for the given reader repo.
+    /// Mark all current bullpen posts as read for the given reader repo.
     ///
     /// Upserts the board_reads row with the current timestamp.
     pub fn mark_board_read(&self, reader_repo: &str) -> Result<()> {
@@ -472,7 +472,7 @@ impl Database {
             .map_err(LegionError::Database)
     }
 
-    /// Get recent board posts (within last N hours).
+    /// Get recent bullpen posts (within last N hours).
     pub fn get_recent_board_posts(&self, hours: i64) -> Result<Vec<Reflection>> {
         let cutoff = (Utc::now() - chrono::Duration::hours(hours)).to_rfc3339();
         let mut stmt = self.conn.prepare(
