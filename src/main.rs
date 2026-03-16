@@ -443,12 +443,12 @@ fn main() -> error::Result<()> {
                 recall::recall_latest(&database, &repo, limit)?
             } else {
                 let index = search::SearchIndex::open(&base.join("index"))?;
-                // Try hybrid recall if model available, fall back to BM25-only
+                // Try hybrid (BM25 + cosine) recall, fall back to BM25-only
                 match try_load_embed_model() {
                     Some(model) => {
-                        recall::recall_hybrid(&database, &index, &model, &repo, &context, limit)?
+                        recall::recall(&database, &index, &model, &repo, &context, limit)?
                     }
-                    None => recall::recall(&database, &index, &repo, &context, limit)?,
+                    None => recall::recall_bm25(&database, &index, &repo, &context, limit)?,
                 }
             };
             let output = recall::format_for_hook(&result);
@@ -462,8 +462,8 @@ fn main() -> error::Result<()> {
             let index = search::SearchIndex::open(&base.join("index"))?;
 
             let result = match try_load_embed_model() {
-                Some(model) => recall::consult_hybrid(&database, &index, &model, &context, limit)?,
-                None => recall::consult(&database, &index, &context, limit)?,
+                Some(model) => recall::consult(&database, &index, &model, &context, limit)?,
+                None => recall::consult_bm25(&database, &index, &context, limit)?,
             };
             let output = recall::format_for_consult(&result);
             if output.is_empty() {

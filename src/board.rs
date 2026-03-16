@@ -178,7 +178,7 @@ mod tests {
         )
         .expect("post");
 
-        let result = recall::consult(&db, &index, "token generation", 5).expect("consult");
+        let result = recall::consult_bm25(&db, &index, "token generation", 5).expect("consult");
         assert_eq!(result.reflections.len(), 1);
         assert!(result.reflections[0].text.contains("token generation"));
     }

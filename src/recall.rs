@@ -121,7 +121,7 @@ fn join_search_results(
 /// (index/DB desync) are logged as warnings to stderr.
 ///
 /// Returns results ordered by descending relevance score.
-pub fn recall(
+pub fn recall_bm25(
     db: &Database,
     index: &SearchIndex,
     repo: &str,
@@ -224,7 +224,7 @@ fn merge_hybrid_scores(
 /// Combines BM25 text search with semantic cosine similarity for better
 /// recall on paraphrased or conceptually related queries. Uses the formula:
 /// `score = 0.6 * bm25_norm + 0.4 * cosine_sim` (then applies boost/decay).
-pub fn recall_hybrid(
+pub fn recall(
     db: &Database,
     index: &SearchIndex,
     embed_model: &EmbedModel,
@@ -244,8 +244,8 @@ pub fn recall_hybrid(
     })
 }
 
-/// Hybrid consult: BM25 + cosine similarity across all repos.
-pub fn consult_hybrid(
+/// Consult: BM25 + cosine similarity across all repos.
+pub fn consult(
     db: &Database,
     index: &SearchIndex,
     embed_model: &EmbedModel,
@@ -295,7 +295,7 @@ pub fn recall_latest(db: &Database, repo: &str, limit: usize) -> Result<RecallRe
 /// Uses `index.search_all()` (no repo filter) and joins with the database
 /// to retrieve full reflection data including the originating repo.
 /// Returns a `RecallResult` with `repo` set to "(all)".
-pub fn consult(
+pub fn consult_bm25(
     db: &Database,
     index: &SearchIndex,
     context: &str,
@@ -377,7 +377,7 @@ mod tests {
         )
         .expect("reflect 3");
 
-        let result = recall(&db, &index, "kelex", "Zod type mapping", 5).expect("recall");
+        let result = recall_bm25(&db, &index, "kelex", "Zod type mapping", 5).expect("recall");
         assert!(result.reflections.len() >= 2);
         assert!(result.reflections[0].score >= result.reflections[1].score);
     }
@@ -387,7 +387,7 @@ mod tests {
         let (db, index, _dir) = test_storage();
         reflect_from_text(&db, &index, "kelex", "some reflection").expect("reflect");
 
-        let result = recall(&db, &index, "kelex", "", 5).expect("recall");
+        let result = recall_bm25(&db, &index, "kelex", "", 5).expect("recall");
         assert!(result.reflections.is_empty());
     }
 
@@ -399,7 +399,7 @@ mod tests {
                 .expect("reflect");
         }
 
-        let result = recall(&db, &index, "test", "testing", 3).expect("recall");
+        let result = recall_bm25(&db, &index, "test", "testing", 3).expect("recall");
         assert_eq!(result.reflections.len(), 3);
     }
 
@@ -415,7 +415,7 @@ mod tests {
         // Add a proper entry through reflect_from_text
         reflect_from_text(&db, &index, "kelex", "properly stored reflection").expect("reflect");
 
-        let result = recall(&db, &index, "kelex", "reflection", 10).expect("recall");
+        let result = recall_bm25(&db, &index, "kelex", "reflection", 10).expect("recall");
 
         // Only the properly stored one should appear
         for r in &result.reflections {
@@ -429,7 +429,7 @@ mod tests {
         reflect_from_text(&db, &index, "kelex", "Zod schema mapping").expect("reflect kelex");
         reflect_from_text(&db, &index, "rafters", "Zod token generation").expect("reflect rafters");
 
-        let result = recall(&db, &index, "kelex", "Zod", 10).expect("recall");
+        let result = recall_bm25(&db, &index, "kelex", "Zod", 10).expect("recall");
         assert_eq!(result.reflections.len(), 1);
         assert!(result.reflections[0].text.contains("mapping"));
     }
@@ -439,7 +439,7 @@ mod tests {
         let (db, index, _dir) = test_storage();
         reflect_from_text(&db, &index, "kelex", "test reflection").expect("reflect");
 
-        let result = recall(&db, &index, "kelex", "test", 5).expect("recall");
+        let result = recall_bm25(&db, &index, "kelex", "test", 5).expect("recall");
         assert_eq!(result.repo, "kelex");
         assert_eq!(result.query, "test");
     }
@@ -512,7 +512,7 @@ mod tests {
         reflect_from_text(&db, &index, "platform", "Zod validation at the edge")
             .expect("reflect platform");
 
-        let result = consult(&db, &index, "Zod", 10).expect("consult");
+        let result = consult_bm25(&db, &index, "Zod", 10).expect("consult");
         // Should match kelex and platform but not rafters
         assert!(result.reflections.len() >= 2);
         let repos: Vec<&str> = result.reflections.iter().map(|r| r.repo.as_str()).collect();
@@ -525,7 +525,7 @@ mod tests {
         let (db, index, _dir) = test_storage();
         reflect_from_text(&db, &index, "kelex", "schema introspection logic").expect("reflect");
 
-        let result = consult(&db, &index, "schema", 5).expect("consult");
+        let result = consult_bm25(&db, &index, "schema", 5).expect("consult");
         assert_eq!(result.reflections.len(), 1);
         assert_eq!(result.reflections[0].repo, "kelex");
         assert_eq!(result.repo, "(all)");
@@ -536,7 +536,7 @@ mod tests {
         let (db, index, _dir) = test_storage();
         reflect_from_text(&db, &index, "kelex", "some reflection text").expect("reflect");
 
-        let result = consult(&db, &index, "", 5).expect("consult");
+        let result = consult_bm25(&db, &index, "", 5).expect("consult");
         assert!(result.reflections.is_empty());
     }
 
@@ -652,7 +652,7 @@ mod tests {
         db.boost_reflection(second_id).unwrap();
         db.boost_reflection(second_id).unwrap();
 
-        let result = recall(&db, &index, "kelex", "Zod", 5).expect("recall");
+        let result = recall_bm25(&db, &index, "kelex", "Zod", 5).expect("recall");
         assert!(result.reflections.len() >= 2);
         // The boosted reflection should have a higher weighted score
         let boosted = result
