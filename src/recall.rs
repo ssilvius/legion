@@ -323,7 +323,7 @@ pub fn format_for_hook(result: &RecallResult) -> String {
     let mut output = format!("[Legion] Relevant reflections for {}:\n", result.repo);
 
     for r in &result.reflections {
-        output.push_str(&format!("- {} (score: {:.2})\n", r.text, r.score));
+        output.push_str(&format!("- {} (id: {}, score: {:.2})\n", r.text, r.id, r.score));
     }
 
     output
@@ -343,8 +343,8 @@ pub fn format_for_consult(result: &RecallResult) -> String {
 
     for r in &result.reflections {
         output.push_str(&format!(
-            "- [{}] {} (score: {:.2})\n",
-            r.repo, r.text, r.score
+            "- [{}] {} (id: {}, score: {:.2})\n",
+            r.repo, r.text, r.id, r.score
         ));
     }
 
@@ -461,6 +461,7 @@ mod tests {
         assert!(output.contains("mapping rules are fragile"));
         assert!(output.contains("kelex"));
         assert!(output.contains("0.87"));
+        assert!(output.contains("id: test-id"));
     }
 
     #[test]
@@ -569,6 +570,8 @@ mod tests {
         assert!(output.contains("schema validation"));
         assert!(output.contains("0.90"));
         assert!(output.contains("0.75"));
+        assert!(output.contains("id: id-1"));
+        assert!(output.contains("id: id-2"));
     }
 
     #[test]
