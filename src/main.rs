@@ -6,6 +6,7 @@ mod init;
 mod recall;
 mod reflect;
 mod search;
+mod serve;
 mod signal;
 mod stats;
 mod surface;
@@ -212,6 +213,13 @@ enum Commands {
         /// Repository name (omit for all repos)
         #[arg(long)]
         repo: Option<String>,
+    },
+
+    /// Start the web dashboard
+    Serve {
+        /// Port to listen on
+        #[arg(long, default_value = "3131")]
+        port: u16,
     },
 
     /// Manage delegated tasks between agents
@@ -671,6 +679,9 @@ fn main() -> error::Result<()> {
             let base = data_dir()?;
             let database = db::Database::open(&base.join("legion.db"))?;
             stats::stats(&database, repo.as_deref())?;
+        }
+        Commands::Serve { port } => {
+            serve::run_server(port, data_dir()?)?;
         }
         Commands::Task { action } => {
             let base = data_dir()?;

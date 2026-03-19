@@ -11,7 +11,7 @@ pub enum Direction {
 }
 
 /// A single task delegated between agents.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 #[allow(dead_code)]
 pub struct Task {
     pub id: String,
@@ -27,7 +27,7 @@ pub struct Task {
 }
 
 /// Map a database row to a Task struct.
-pub(crate) fn map_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
+pub fn map_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
     Ok(Task {
         id: row.get(0)?,
         from_repo: row.get(1)?,

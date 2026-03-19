@@ -41,6 +41,9 @@ pub enum LegionError {
 
     #[error("invalid state transition: cannot {action} a task with status '{current}'")]
     InvalidTaskTransition { action: String, current: String },
+
+    #[error("server error: {0}")]
+    Server(String),
 }
 
 pub type Result<T> = std::result::Result<T, LegionError>;
