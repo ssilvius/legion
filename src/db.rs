@@ -666,6 +666,17 @@ impl Database {
         Ok(())
     }
 
+    /// Count pending tasks assigned to a repo (for bullpen --count path).
+    pub fn count_pending_tasks_for_repo(&self, repo: &str) -> Result<u64> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT COUNT(*) FROM tasks WHERE to_repo = ?1 AND status = 'pending'")?;
+        let count: u64 = stmt
+            .query_row([repo], |row| row.get(0))
+            .map_err(LegionError::Database)?;
+        Ok(count)
+    }
+
     /// Get pending tasks assigned to a repo (for surface output).
     pub fn get_pending_tasks_for_repo(&self, repo: &str) -> Result<Vec<crate::task::Task>> {
         let mut stmt = self.conn.prepare(

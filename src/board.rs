@@ -139,14 +139,22 @@ pub fn format_bullpen(posts: &[Reflection]) -> String {
 
 /// Format unread bullpen count for display.
 ///
-/// Returns a message like "3 unread posts on the bullpen" when count > 0.
-/// Returns an empty string when count is 0 (no noise for hooks).
-pub fn format_bullpen_count(count: u64) -> String {
-    if count == 0 {
+/// Returns a combined message when posts or tasks are present.
+/// Returns an empty string when both are 0 (no noise for hooks).
+pub fn format_bullpen_count(post_count: u64, task_count: u64) -> String {
+    if post_count == 0 && task_count == 0 {
         return String::new();
     }
 
-    format!("{} unread posts on the bullpen", count)
+    let mut parts: Vec<String> = Vec::new();
+    if post_count > 0 {
+        parts.push(format!("{} unread posts", post_count));
+    }
+    if task_count > 0 {
+        parts.push(format!("{} pending tasks", task_count));
+    }
+
+    format!("{} on the bullpen", parts.join(", "))
 }
 
 #[cfg(test)]
@@ -272,14 +280,26 @@ mod tests {
 
     #[test]
     fn format_bullpen_count_zero_is_empty_string() {
-        let output = format_bullpen_count(0);
+        let output = format_bullpen_count(0, 0);
         assert!(output.is_empty());
     }
 
     #[test]
-    fn format_bullpen_count_nonzero_shows_message() {
-        let output = format_bullpen_count(3);
+    fn format_bullpen_count_posts_only() {
+        let output = format_bullpen_count(3, 0);
         assert_eq!(output, "3 unread posts on the bullpen");
+    }
+
+    #[test]
+    fn format_bullpen_count_tasks_only() {
+        let output = format_bullpen_count(0, 2);
+        assert_eq!(output, "2 pending tasks on the bullpen");
+    }
+
+    #[test]
+    fn format_bullpen_count_posts_and_tasks() {
+        let output = format_bullpen_count(3, 2);
+        assert_eq!(output, "3 unread posts, 2 pending tasks on the bullpen");
     }
 
     #[test]
