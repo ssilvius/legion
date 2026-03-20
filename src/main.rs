@@ -625,7 +625,9 @@ fn main() -> error::Result<()> {
 
             if count {
                 let n = board::bullpen_count(&database, &repo)?;
-                let output = board::format_bullpen_count(n);
+                let task_count = task::get_pending_inbound(&database, &repo)?
+                    .len() as u64;
+                let output = board::format_bullpen_count(n + task_count);
                 if !output.is_empty() {
                     println!("{output}");
                 }
@@ -638,9 +640,11 @@ fn main() -> error::Result<()> {
                     board::BullpenFilter::All
                 };
                 let posts = board::bullpen_filtered(&database, &repo, filter)?;
+                let pending_tasks = task::get_pending_inbound(&database, &repo)?;
                 let output = board::format_bullpen(&posts);
-                if !output.is_empty() {
-                    print!("{output}");
+                let task_output = task::format_pending_for_surface(&pending_tasks);
+                if !output.is_empty() || !task_output.is_empty() {
+                    print!("{output}{task_output}");
                 }
             }
         }
