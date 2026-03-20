@@ -6,6 +6,7 @@ mod init;
 mod recall;
 mod reflect;
 mod search;
+mod serve;
 mod signal;
 mod stats;
 mod surface;
@@ -212,6 +213,13 @@ enum Commands {
         /// Repository name (omit for all repos)
         #[arg(long)]
         repo: Option<String>,
+    },
+
+    /// Start the web dashboard
+    Serve {
+        /// Port to listen on
+        #[arg(long, default_value = "3131")]
+        port: u16,
     },
 
     /// Manage delegated tasks between agents
@@ -616,8 +624,9 @@ fn main() -> error::Result<()> {
             let database = db::Database::open(&base.join("legion.db"))?;
 
             if count {
-                let n = board::bullpen_count(&database, &repo)?;
-                let output = board::format_bullpen_count(n);
+                let post_count = board::bullpen_count(&database, &repo)?;
+                let task_count = task::count_pending_inbound(&database, &repo)?;
+                let output = board::format_bullpen_count(post_count, task_count);
                 if !output.is_empty() {
                     println!("{output}");
                 }
@@ -630,7 +639,12 @@ fn main() -> error::Result<()> {
                     board::BullpenFilter::All
                 };
                 let posts = board::bullpen_filtered(&database, &repo, filter)?;
-                let output = board::format_bullpen(&posts);
+                let mut output = board::format_bullpen(&posts);
+                if filter == board::BullpenFilter::All {
+                    let pending_tasks = task::get_pending_inbound(&database, &repo)?;
+                    let task_output = task::format_pending_for_surface(&pending_tasks);
+                    output.push_str(&task_output);
+                }
                 if !output.is_empty() {
                     print!("{output}");
                 }
@@ -671,6 +685,9 @@ fn main() -> error::Result<()> {
             let base = data_dir()?;
             let database = db::Database::open(&base.join("legion.db"))?;
             stats::stats(&database, repo.as_deref())?;
+        }
+        Commands::Serve { port } => {
+            serve::run_server(port, data_dir()?)?;
         }
         Commands::Task { action } => {
             let base = data_dir()?;

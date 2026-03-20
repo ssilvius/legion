@@ -11,7 +11,7 @@ pub enum Direction {
 }
 
 /// A single task delegated between agents.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 #[allow(dead_code)]
 pub struct Task {
     pub id: String,
@@ -27,7 +27,7 @@ pub struct Task {
 }
 
 /// Map a database row to a Task struct.
-pub(crate) fn map_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
+pub fn map_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
     Ok(Task {
         id: row.get(0)?,
         from_repo: row.get(1)?,
@@ -120,6 +120,11 @@ fn priority_tag(priority: &str) -> String {
 /// Get pending inbound tasks for a repo (used by surface).
 pub fn get_pending_inbound(db: &Database, repo: &str) -> Result<Vec<Task>> {
     db.get_pending_tasks_for_repo(repo)
+}
+
+/// Count pending inbound tasks for a repo (used by bullpen --count).
+pub fn count_pending_inbound(db: &Database, repo: &str) -> Result<u64> {
+    db.count_pending_tasks_for_repo(repo)
 }
 
 /// Format a task list for display.
@@ -332,6 +337,21 @@ mod tests {
         assert!(output.contains("test task"));
         assert!(output.contains("[high]"));
         assert!(output.contains("from:kelex"));
+    }
+
+    #[test]
+    fn count_and_get_pending_are_consistent() {
+        let (db, _index, _dir) = test_storage();
+        create_task(&db, "kelex", "legion", "task one", None, "med").expect("create");
+        create_task(&db, "kelex", "legion", "task two", None, "high").expect("create");
+
+        let count = count_pending_inbound(&db, "legion").expect("count");
+        let tasks = get_pending_inbound(&db, "legion").expect("get");
+        assert_eq!(
+            count,
+            tasks.len() as u64,
+            "count_pending and get_pending must agree"
+        );
     }
 
     #[test]

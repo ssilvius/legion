@@ -427,6 +427,48 @@ fn bullpen_count_output() {
 }
 
 #[test]
+fn bullpen_count_includes_pending_tasks() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Post to bullpen
+    let out = legion_cmd(dir.path())
+        .args(["post", "--repo", "kelex", "--text", "a shared thought"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    // Create a pending task for the reader
+    let out = legion_cmd(dir.path())
+        .args([
+            "task",
+            "create",
+            "--from",
+            "kelex",
+            "--to",
+            "platform",
+            "--text",
+            "urgent work",
+            "--priority",
+            "high",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    // Count should show both posts and tasks
+    let output = legion_cmd(dir.path())
+        .args(["bullpen", "--repo", "platform", "--count"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("1 unread posts, 1 pending tasks on the bullpen"),
+        "expected combined count, got: {stdout}"
+    );
+}
+
+#[test]
 fn reindex_rebuilds_from_database() {
     let dir = tempfile::tempdir().unwrap();
 

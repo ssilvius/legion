@@ -38,6 +38,16 @@ pub struct Reflection {
     pub parent_id: Option<String>,
 }
 
+/// Per-repo dashboard stats for the serve API.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DashboardRepoStats {
+    pub repo: String,
+    pub reflection_count: u64,
+    pub boost_sum: i64,
+    pub team_post_count: u64,
+    pub last_activity: String,
+}
+
 /// Aggregate statistics for a repository's reflections.
 #[derive(Debug)]
 pub struct RepoStats {
@@ -520,6 +530,68 @@ impl Database {
             .map_err(LegionError::Database)
     }
 
+    /// Get all distinct repo names from reflections.
+    pub fn get_distinct_repos(&self) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT repo FROM reflections ORDER BY repo")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
+    /// Get unread bullpen counts for all known repos.
+    ///
+    /// Returns (repo_name, unread_count) pairs by calling get_unread_count
+    /// for each distinct repo.
+    pub fn get_unread_counts_all(&self) -> Result<Vec<(String, u64)>> {
+        let repos = self.get_distinct_repos()?;
+        let mut counts: Vec<(String, u64)> = Vec::with_capacity(repos.len());
+        for repo in repos {
+            let count = self.get_unread_count(&repo)?;
+            counts.push((repo, count));
+        }
+        Ok(counts)
+    }
+
+    /// Get per-repo stats for the dashboard.
+    ///
+    /// Returns repo, reflection_count, boost_sum, team_post_count, and
+    /// last_activity for each repo with reflections.
+    pub fn get_dashboard_stats(&self) -> Result<Vec<DashboardRepoStats>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT repo, COUNT(*) as cnt, \
+             COALESCE(SUM(recall_count), 0) as boost, \
+             SUM(CASE WHEN audience = 'team' THEN 1 ELSE 0 END) as team_cnt, \
+             MAX(created_at) as last_act \
+             FROM reflections GROUP BY repo ORDER BY repo",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok(DashboardRepoStats {
+                repo: row.get(0)?,
+                reflection_count: row.get(1)?,
+                boost_sum: row.get(2)?,
+                team_post_count: row.get(3)?,
+                last_activity: row.get(4)?,
+            })
+        })?;
+
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
+    /// Get all tasks regardless of repo (for kanban view).
+    pub fn get_all_tasks(&self) -> Result<Vec<crate::task::Task>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, from_repo, to_repo, text, context, priority, status, note, created_at, updated_at \
+             FROM tasks ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([], crate::task::map_task_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
     // --- Task CRUD ---
 
     /// Insert a new task and return its UUIDv7 ID.
@@ -594,6 +666,17 @@ impl Database {
         Ok(())
     }
 
+    /// Count pending tasks assigned to a repo (for bullpen --count path).
+    pub fn count_pending_tasks_for_repo(&self, repo: &str) -> Result<u64> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT COUNT(*) FROM tasks WHERE to_repo = ?1 AND status = 'pending'")?;
+        let count: u64 = stmt
+            .query_row([repo], |row| row.get(0))
+            .map_err(LegionError::Database)?;
+        Ok(count)
+    }
+
     /// Get pending tasks assigned to a repo (for surface output).
     pub fn get_pending_tasks_for_repo(&self, repo: &str) -> Result<Vec<crate::task::Task>> {
         let mut stmt = self.conn.prepare(
@@ -603,6 +686,26 @@ impl Database {
         let rows = stmt.query_map([repo], crate::task::map_task_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(LegionError::Database)
+    }
+
+    /// Get the most recent created_at timestamp from reflections.
+    pub fn get_max_created_at(&self) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT MAX(created_at) FROM reflections")?;
+        let result: Option<String> = stmt
+            .query_row([], |row| row.get(0))
+            .map_err(LegionError::Database)?;
+        Ok(result)
+    }
+
+    /// Get the most recent updated_at timestamp from tasks.
+    pub fn get_max_task_updated_at(&self) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare("SELECT MAX(updated_at) FROM tasks")?;
+        let result: Option<String> = stmt
+            .query_row([], |row| row.get(0))
+            .map_err(LegionError::Database)?;
+        Ok(result)
     }
 
     /// Get recently extended learning chains.

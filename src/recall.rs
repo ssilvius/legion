@@ -323,7 +323,10 @@ pub fn format_for_hook(result: &RecallResult) -> String {
     let mut output = format!("[Legion] Relevant reflections for {}:\n", result.repo);
 
     for r in &result.reflections {
-        output.push_str(&format!("- {} (id: {}, score: {:.2})\n", r.text, r.id, r.score));
+        output.push_str(&format!(
+            "- {} (id: {}, score: {:.2})\n",
+            r.text, r.id, r.score
+        ));
     }
 
     output
