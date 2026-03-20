@@ -625,8 +625,7 @@ fn main() -> error::Result<()> {
 
             if count {
                 let n = board::bullpen_count(&database, &repo)?;
-                let task_count = task::get_pending_inbound(&database, &repo)?
-                    .len() as u64;
+                let task_count = task::get_pending_inbound(&database, &repo)?.len() as u64;
                 let output = board::format_bullpen_count(n + task_count);
                 if !output.is_empty() {
                     println!("{output}");
