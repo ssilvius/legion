@@ -273,74 +273,8 @@
 
     // Feed list
     var list = el("div", "feed-list");
-
-    var items = state.feed.filter(function (item) {
-      if (state.feedRepo !== "all" && item.repo !== state.feedRepo) return false;
-      if (state.feedFilter === "signals" && !item.is_signal) return false;
-      if (state.feedFilter === "musings" && item.is_signal) return false;
-      return true;
-    });
-
-    if (items.length === 0) {
-      list.appendChild(el("p", "placeholder", "No posts"));
-    }
-
-    items.forEach(function (item) {
-      var card = el("div", "feed-item" + (item.is_signal ? " signal" : ""));
-
-      var header = el("div", "feed-item-header");
-      header.appendChild(el("span", "badge badge-green", item.repo));
-      header.appendChild(el("span", null, relativeTime(item.created_at)));
-      if (item.is_signal) {
-        header.appendChild(el("span", "badge badge-blue", "signal"));
-      }
-
-      var boostBtn = el("button", "boost-btn", "+boost");
-      (function (postId, btn) {
-        btn.addEventListener("click", function () {
-          btn.disabled = true;
-          postToApi("/api/boost/" + postId)
-            .then(function (r) {
-              if (r.ok) {
-                btn.textContent = "boosted";
-                btn.classList.add("boosted");
-              } else {
-                btn.disabled = false;
-              }
-            })
-            .catch(function () {
-              btn.disabled = false;
-            });
-        });
-      })(item.id, boostBtn);
-      header.appendChild(boostBtn);
-
-      card.appendChild(header);
-
-      var textEl = el("div", "feed-item-text");
-      var full = item.text;
-      var short = truncate(full, 200);
-      var expanded = false;
-      textEl.textContent = short;
-
-      if (full.length > 200) {
-        var toggle = el("button", "feed-item-toggle", "show more");
-        toggle.addEventListener("click", function () {
-          expanded = !expanded;
-          textEl.textContent = expanded ? full : short;
-          toggle.textContent = expanded ? "show less" : "show more";
-          // Re-append toggle after textContent reset
-          card.appendChild(toggle);
-        });
-        card.appendChild(textEl);
-        card.appendChild(toggle);
-      } else {
-        card.appendChild(textEl);
-      }
-
-      list.appendChild(card);
-    });
-
+    list.id = "feed-list-container";
+    list.appendChild(buildFeedItems());
     container.appendChild(list);
     return container;
   }
@@ -467,47 +401,8 @@
     container.appendChild(renderTaskForm());
 
     var kanban = el("div", "kanban");
-
-    var columns = ["pending", "accepted", "done", "blocked"];
-    var labels = { pending: "Pending", accepted: "Accepted", done: "Done", blocked: "Blocked" };
-
-    columns.forEach(function (status) {
-      var col = el("div", "kanban-col");
-      var tasks = state.tasks.filter(function (t) { return t.status === status; });
-
-      var header = el("div", "kanban-col-header");
-      header.textContent = labels[status] + " ";
-      var count = el("span", "kanban-col-count", "(" + tasks.length + ")");
-      header.appendChild(count);
-      col.appendChild(header);
-
-      var cards = el("div", "kanban-cards");
-
-      tasks.forEach(function (task) {
-        var card = el("div", "kanban-card");
-
-        var route = el("div", "kanban-card-route", task.from_repo + " -> " + task.to_repo);
-        card.appendChild(route);
-
-        var text = el("div", "kanban-card-text", truncate(task.text, 120));
-        card.appendChild(text);
-
-        var footer = el("div", "kanban-card-footer");
-        footer.appendChild(el("span", priorityBadgeClass(task.priority), task.priority));
-        footer.appendChild(el("span", null, relativeTime(task.created_at)));
-        card.appendChild(footer);
-
-        cards.appendChild(card);
-      });
-
-      if (tasks.length === 0) {
-        cards.appendChild(el("p", "placeholder", "none"));
-      }
-
-      col.appendChild(cards);
-      kanban.appendChild(col);
-    });
-
+    kanban.id = "kanban-container";
+    kanban.appendChild(buildKanbanColumns());
     container.appendChild(kanban);
     return container;
   }
@@ -617,7 +512,9 @@
       .then(function (r) { return r.json(); })
       .then(function (data) {
         state.chatMessages = data;
-        if (currentTab() === "chat") render();
+        if (currentTab() === "chat") {
+          if (!updateChatMessages()) render();
+        }
       })
       .catch(function (err) {
         console.error("[legion] chat fetch error:", err);
@@ -662,35 +559,11 @@
 
     // Message list
     var messageList = el("div", "chat-messages");
-
-    if (state.chatMessages.length === 0) {
-      messageList.appendChild(el("p", "placeholder", "No messages with @" + state.chatAgent));
-    }
-
-    state.chatMessages.forEach(function (msg) {
-      var isMeatbag = msg.repo.toLowerCase() === "meatbag";
-      var msgEl = el("div", "chat-msg" + (isMeatbag ? " meatbag" : " agent"));
-
-      var senderBadge = el("span", "badge " + (isMeatbag ? "badge-green" : "badge-blue"), msg.repo);
-      var time = el("span", "chat-msg-time", relativeTime(msg.created_at));
-
-      var msgHeader = el("div", "chat-msg-header");
-      msgHeader.appendChild(senderBadge);
-      msgHeader.appendChild(time);
-      msgEl.appendChild(msgHeader);
-
-      var textEl = el("div", "chat-msg-text", msg.text);
-      msgEl.appendChild(textEl);
-
-      messageList.appendChild(msgEl);
-    });
-
+    messageList.id = "chat-messages-container";
     container.appendChild(messageList);
 
-    // Scroll to bottom after render
-    setTimeout(function () {
-      messageList.scrollTop = messageList.scrollHeight;
-    }, 0);
+    // Populate via shared builder (also handles scroll)
+    updateChatMessages();
 
     // Input area
     var inputBar = el("div", "chat-input");
@@ -739,6 +612,175 @@
     container.appendChild(inputBar);
 
     return container;
+  }
+
+  // -- Targeted update helpers --
+
+  function buildFeedItems() {
+    var frag = document.createDocumentFragment();
+
+    var items = state.feed.filter(function (item) {
+      if (state.feedRepo !== "all" && item.repo !== state.feedRepo) return false;
+      if (state.feedFilter === "signals" && !item.is_signal) return false;
+      if (state.feedFilter === "musings" && item.is_signal) return false;
+      return true;
+    });
+
+    if (items.length === 0) {
+      frag.appendChild(el("p", "placeholder", "No posts"));
+    }
+
+    items.forEach(function (item) {
+      var card = el("div", "feed-item" + (item.is_signal ? " signal" : ""));
+
+      var header = el("div", "feed-item-header");
+      header.appendChild(el("span", "badge badge-green", item.repo));
+      header.appendChild(el("span", null, relativeTime(item.created_at)));
+      if (item.is_signal) {
+        header.appendChild(el("span", "badge badge-blue", "signal"));
+      }
+
+      var boostBtn = el("button", "boost-btn", "+boost");
+      (function (postId, btn) {
+        btn.addEventListener("click", function () {
+          btn.disabled = true;
+          postToApi("/api/boost/" + postId)
+            .then(function (r) {
+              if (r.ok) {
+                btn.textContent = "boosted";
+                btn.classList.add("boosted");
+              } else {
+                btn.disabled = false;
+              }
+            })
+            .catch(function () {
+              btn.disabled = false;
+            });
+        });
+      })(item.id, boostBtn);
+      header.appendChild(boostBtn);
+
+      card.appendChild(header);
+
+      var textEl = el("div", "feed-item-text");
+      var full = item.text;
+      var short = truncate(full, 200);
+      var expanded = false;
+      textEl.textContent = short;
+
+      if (full.length > 200) {
+        var toggle = el("button", "feed-item-toggle", "show more");
+        toggle.addEventListener("click", function () {
+          expanded = !expanded;
+          textEl.textContent = expanded ? full : short;
+          toggle.textContent = expanded ? "show less" : "show more";
+          card.appendChild(toggle);
+        });
+        card.appendChild(textEl);
+        card.appendChild(toggle);
+      } else {
+        card.appendChild(textEl);
+      }
+
+      frag.appendChild(card);
+    });
+
+    return frag;
+  }
+
+  function updateFeedList() {
+    var container = document.getElementById("feed-list-container");
+    if (!container) return false;
+    container.replaceChildren();
+    container.appendChild(buildFeedItems());
+    return true;
+  }
+
+  function buildKanbanColumns() {
+    var frag = document.createDocumentFragment();
+    var columns = ["pending", "accepted", "done", "blocked"];
+    var labels = { pending: "Pending", accepted: "Accepted", done: "Done", blocked: "Blocked" };
+
+    columns.forEach(function (status) {
+      var col = el("div", "kanban-col");
+      var tasks = state.tasks.filter(function (t) { return t.status === status; });
+
+      var header = el("div", "kanban-col-header");
+      header.textContent = labels[status] + " ";
+      var count = el("span", "kanban-col-count", "(" + tasks.length + ")");
+      header.appendChild(count);
+      col.appendChild(header);
+
+      var cards = el("div", "kanban-cards");
+
+      tasks.forEach(function (task) {
+        var card = el("div", "kanban-card");
+
+        var route = el("div", "kanban-card-route", task.from_repo + " -> " + task.to_repo);
+        card.appendChild(route);
+
+        var text = el("div", "kanban-card-text", truncate(task.text, 120));
+        card.appendChild(text);
+
+        var footer = el("div", "kanban-card-footer");
+        footer.appendChild(el("span", priorityBadgeClass(task.priority), task.priority));
+        footer.appendChild(el("span", null, relativeTime(task.created_at)));
+        card.appendChild(footer);
+
+        cards.appendChild(card);
+      });
+
+      if (tasks.length === 0) {
+        cards.appendChild(el("p", "placeholder", "none"));
+      }
+
+      col.appendChild(cards);
+      frag.appendChild(col);
+    });
+
+    return frag;
+  }
+
+  function updateKanban() {
+    var container = document.getElementById("kanban-container");
+    if (!container) return false;
+    container.replaceChildren();
+    container.appendChild(buildKanbanColumns());
+    return true;
+  }
+
+  function updateChatMessages() {
+    var container = document.getElementById("chat-messages-container");
+    if (!container) return false;
+    container.replaceChildren();
+
+    if (state.chatMessages.length === 0) {
+      container.appendChild(el("p", "placeholder", "No messages with @" + state.chatAgent));
+    }
+
+    state.chatMessages.forEach(function (msg) {
+      var isMeatbag = msg.repo.toLowerCase() === "meatbag";
+      var msgEl = el("div", "chat-msg" + (isMeatbag ? " meatbag" : " agent"));
+
+      var senderBadge = el("span", "badge " + (isMeatbag ? "badge-green" : "badge-blue"), msg.repo);
+      var time = el("span", "chat-msg-time", relativeTime(msg.created_at));
+
+      var msgHeader = el("div", "chat-msg-header");
+      msgHeader.appendChild(senderBadge);
+      msgHeader.appendChild(time);
+      msgEl.appendChild(msgHeader);
+
+      var textEl = el("div", "chat-msg-text", msg.text);
+      msgEl.appendChild(textEl);
+
+      container.appendChild(msgEl);
+    });
+
+    setTimeout(function () {
+      container.scrollTop = container.scrollHeight;
+    }, 0);
+
+    return true;
   }
 
   // -- Renderers --
@@ -813,10 +855,20 @@
     source.addEventListener("feed", function (event) {
       try {
         state.feed = JSON.parse(event.data);
-        if (currentTab() === "feed") render();
+        if (currentTab() === "feed") {
+          if (!updateFeedList()) render();
+        }
         if (currentTab() === "chat" && state.chatAgent) fetchChat(state.chatAgent);
         // Refresh signals when feed changes (signals come from feed data)
-        fetchJSON("/api/signals", "signals");
+        fetch("/api/signals")
+          .then(function (r) { return r.json(); })
+          .then(function (data) {
+            state.signals = data;
+            if (currentTab() === "signals") render();
+          })
+          .catch(function (err) {
+            console.error("[legion] signals fetch error:", err);
+          });
       } catch (e) {
         console.error("[legion] feed parse error:", e);
       }
@@ -825,7 +877,9 @@
     source.addEventListener("tasks", function (event) {
       try {
         state.tasks = JSON.parse(event.data);
-        if (currentTab() === "tasks") render();
+        if (currentTab() === "tasks") {
+          if (!updateKanban()) render();
+        }
       } catch (e) {
         console.error("[legion] tasks parse error:", e);
       }
