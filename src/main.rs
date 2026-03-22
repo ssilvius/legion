@@ -9,6 +9,7 @@ mod search;
 mod serve;
 mod signal;
 mod stats;
+mod status;
 mod surface;
 mod task;
 #[cfg(test)]
@@ -220,6 +221,13 @@ enum Commands {
         /// Port to listen on
         #[arg(long, default_value = "3131")]
         port: u16,
+    },
+
+    /// Check your work state, team needs, and recent changes
+    Status {
+        /// Repository name
+        #[arg(long)]
+        repo: String,
     },
 
     /// Manage delegated tasks between agents
@@ -740,6 +748,20 @@ fn main() -> error::Result<()> {
         }
         Commands::Serve { port } => {
             serve::run_server(port, data_dir()?)?;
+        }
+        Commands::Status { repo } => {
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+            let output = status::get_status(&database, &repo)?;
+            let formatted = status::format_status(&output);
+            if formatted.is_empty() {
+                println!(
+                    "[Legion] Status for {}: all clear. Check `gh issue list` for GitHub issues.",
+                    repo
+                );
+            } else {
+                print!("{formatted}");
+            }
         }
         Commands::Task { action } => {
             let base = data_dir()?;
