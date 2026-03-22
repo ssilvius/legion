@@ -24,15 +24,17 @@ pub struct StatusOutput {
 }
 
 /// Hours to look back for team posts.
-const LOOKBACK_HOURS: i64 = 24;
-/// Maximum items in the WHAT CHANGED section.
+const LOOKBACK_HOURS: i64 = 8;
+/// Maximum items per section.
+const MAX_NEEDS: usize = 10;
 const MAX_CHANGED: usize = 10;
 
 /// Gather the full status for a repo.
 pub fn get_status(db: &Database, repo: &str) -> Result<StatusOutput> {
     let your_work = get_your_work(db, repo)?;
-    let team_needs = get_team_needs(db, repo)?;
-    let what_changed = get_what_changed(db, repo, &team_needs)?;
+    let posts: Vec<Reflection> = db.get_recent_board_posts(LOOKBACK_HOURS)?;
+    let (team_needs, seen_ids) = get_team_needs(&posts, repo);
+    let what_changed = get_what_changed(&posts, repo, &seen_ids);
 
     Ok(StatusOutput {
         repo: repo.to_string(),
@@ -44,47 +46,29 @@ pub fn get_status(db: &Database, repo: &str) -> Result<StatusOutput> {
 
 /// Format status output for terminal display.
 pub fn format_status(output: &StatusOutput) -> String {
-    let has_work = !output.your_work.is_empty();
-    let has_needs = !output.team_needs.is_empty();
-    let has_changed = !output.what_changed.is_empty();
-
-    if !has_work && !has_needs && !has_changed {
+    if output.your_work.is_empty() && output.team_needs.is_empty() && output.what_changed.is_empty()
+    {
         return String::new();
     }
 
     let mut out = format!("[Legion] Status for {}:\n", output.repo);
-
-    if has_work {
-        out.push_str("\nYOUR WORK:\n");
-        for item in &output.your_work {
-            out.push_str(&format!(
-                "  [{}] {}  (from: {}, {})\n",
-                item.category, item.text, item.from, item.age
-            ));
-        }
-    }
-
-    if has_needs {
-        out.push_str("\nTEAM NEEDS YOU:\n");
-        for item in &output.team_needs {
-            out.push_str(&format!(
-                "  [{}] {}  (from: {}, {})\n",
-                item.category, item.text, item.from, item.age
-            ));
-        }
-    }
-
-    if has_changed {
-        out.push_str("\nWHAT CHANGED:\n");
-        for item in &output.what_changed {
-            out.push_str(&format!(
-                "  [{}] {}  (from: {}, {})\n",
-                item.category, item.text, item.from, item.age
-            ));
-        }
-    }
-
+    format_section(&mut out, "YOUR WORK", &output.your_work);
+    format_section(&mut out, "TEAM NEEDS YOU", &output.team_needs);
+    format_section(&mut out, "WHAT CHANGED", &output.what_changed);
     out
+}
+
+fn format_section(out: &mut String, header: &str, items: &[StatusItem]) {
+    if items.is_empty() {
+        return;
+    }
+    out.push_str(&format!("\n{header}:\n"));
+    for item in items {
+        out.push_str(&format!(
+            "  [{}] {}  (from: {}, {})\n",
+            item.category, item.text, item.from, item.age
+        ));
+    }
 }
 
 /// YOUR WORK: pending, accepted, and blocked tasks assigned to this repo.
@@ -110,93 +94,111 @@ fn get_your_work(db: &Database, repo: &str) -> Result<Vec<StatusItem>> {
     Ok(items)
 }
 
-/// TEAM NEEDS YOU: recent posts mentioning this repo or @all with action keywords.
-fn get_team_needs(db: &Database, repo: &str) -> Result<Vec<StatusItem>> {
-    let posts: Vec<Reflection> = db.get_recent_board_posts(LOOKBACK_HOURS)?;
+/// TEAM NEEDS YOU: recent posts with actionable requests directed at this repo.
+/// Returns items and the set of post IDs included (for dedup in what_changed).
+fn get_team_needs(posts: &[Reflection], repo: &str) -> (Vec<StatusItem>, Vec<String>) {
     let repo_lower: String = repo.to_lowercase();
     let at_repo: String = format!("@{}", repo_lower);
     let mut items: Vec<StatusItem> = Vec::new();
+    let mut seen_ids: Vec<String> = Vec::new();
 
-    for p in &posts {
-        // Skip own posts
+    for p in posts {
+        if items.len() >= MAX_NEEDS {
+            break;
+        }
+
         if p.repo.to_lowercase() == repo_lower {
             continue;
         }
 
         let text_lower: String = p.text.to_lowercase();
 
-        // Check if this is a signal directed at this repo
-        if let Some(sig) = signal::parse_signal(&p.text) {
-            let directed: bool =
-                sig.recipient.to_lowercase() == repo_lower || sig.recipient.to_lowercase() == "all";
-            let is_actionable: bool = matches!(
-                sig.verb.to_lowercase().as_str(),
-                "review" | "question" | "request" | "blocker"
-            );
-
-            if directed && is_actionable {
-                let category: String = categorize_signal(&sig.verb);
-                items.push(StatusItem {
-                    category,
-                    text: truncate(&p.text, 120),
-                    from: p.repo.clone(),
-                    age: relative_time(&p.created_at),
-                });
-                continue;
-            }
-        }
-
-        // Check for direct @mention
-        if text_lower.contains(&at_repo) {
-            let category: String = categorize_post_text(&text_lower);
-            items.push(StatusItem {
-                category,
-                text: truncate(&p.text, 120),
-                from: p.repo.clone(),
-                age: relative_time(&p.created_at),
-            });
+        // Skip CLI command requests -- these are for legion-the-storage, not the agent
+        if text_lower.contains("legion reflect")
+            || text_lower.contains("legion boost")
+            || text_lower.contains("legion consult")
+        {
             continue;
         }
 
-        // Check for @all with action keywords
-        if text_lower.contains("@all") && has_action_keyword(&text_lower) {
-            let category: String = categorize_post_text(&text_lower);
+        // Signals directed at this repo (not @all) with actionable verbs
+        if let Some(sig) = signal::parse_signal(&p.text)
+            && sig.recipient.to_lowercase() == repo_lower
+            && matches!(
+                sig.verb.to_lowercase().as_str(),
+                "review" | "question" | "request" | "blocker"
+            )
+        {
             items.push(StatusItem {
-                category,
+                category: categorize_signal(&sig.verb),
                 text: truncate(&p.text, 120),
                 from: p.repo.clone(),
                 age: relative_time(&p.created_at),
             });
+            seen_ids.push(p.id.clone());
+            continue;
+        }
+
+        // Direct @mention (not just @all)
+        if text_lower.contains(&at_repo) {
+            items.push(StatusItem {
+                category: categorize_post_text(&text_lower),
+                text: truncate(&p.text, 120),
+                from: p.repo.clone(),
+                age: relative_time(&p.created_at),
+            });
+            seen_ids.push(p.id.clone());
+            continue;
+        }
+
+        // @all posts: only PR review requests or blocker announcements
+        if text_lower.contains("@all") && is_actionable_broadcast(&text_lower) {
+            items.push(StatusItem {
+                category: categorize_broadcast(&text_lower),
+                text: truncate(&p.text, 120),
+                from: p.repo.clone(),
+                age: relative_time(&p.created_at),
+            });
+            seen_ids.push(p.id.clone());
         }
     }
 
-    Ok(items)
+    (items, seen_ids)
+}
+
+/// Check if an @all broadcast is actionable (PR review request or blocker).
+fn is_actionable_broadcast(text: &str) -> bool {
+    is_review_request(text) || text.contains("blocked") || text.contains("blocker")
+}
+
+/// Check if text is an explicit PR review request.
+fn is_review_request(text: &str) -> bool {
+    let has_pr: bool =
+        text.contains("pr #") || text.contains("pr#") || text.contains("pull request");
+    has_pr && text.contains("review")
+}
+
+/// Categorize an @all broadcast for display.
+fn categorize_broadcast(text: &str) -> String {
+    if is_review_request(text) {
+        "REVIEW".to_string()
+    } else {
+        "BLOCKER".to_string()
+    }
 }
 
 /// WHAT CHANGED: recent announcements and status updates, excluding items
-/// already in team_needs.
-fn get_what_changed(
-    db: &Database,
-    repo: &str,
-    team_needs: &[StatusItem],
-) -> Result<Vec<StatusItem>> {
-    let posts: Vec<Reflection> = db.get_recent_board_posts(LOOKBACK_HOURS)?;
+/// already shown in team_needs.
+fn get_what_changed(posts: &[Reflection], repo: &str, seen_ids: &[String]) -> Vec<StatusItem> {
     let repo_lower: String = repo.to_lowercase();
     let mut items: Vec<StatusItem> = Vec::new();
 
-    // Build a set of texts already shown in team_needs to avoid duplicates
-    let needs_texts: Vec<String> = team_needs.iter().map(|n| n.text.clone()).collect();
-
-    for p in &posts {
-        // Skip own posts
+    for p in posts {
         if p.repo.to_lowercase() == repo_lower {
             continue;
         }
 
-        let preview: String = truncate(&p.text, 120);
-
-        // Skip if already in team_needs
-        if needs_texts.contains(&preview) {
+        if seen_ids.contains(&p.id) {
             continue;
         }
 
@@ -211,7 +213,7 @@ fn get_what_changed(
         {
             items.push(StatusItem {
                 category: "UPDATE".to_string(),
-                text: preview,
+                text: truncate(&p.text, 120),
                 from: p.repo.clone(),
                 age: relative_time(&p.created_at),
             });
@@ -225,7 +227,7 @@ fn get_what_changed(
         if has_update_keyword(&text_lower) {
             items.push(StatusItem {
                 category: "UPDATE".to_string(),
-                text: preview,
+                text: truncate(&p.text, 120),
                 from: p.repo.clone(),
                 age: relative_time(&p.created_at),
             });
@@ -235,7 +237,7 @@ fn get_what_changed(
         }
     }
 
-    Ok(items)
+    items
 }
 
 /// Convert an ISO 8601 timestamp to a relative time string.
@@ -292,19 +294,9 @@ fn categorize_post_text(text_lower: &str) -> String {
     }
 }
 
-/// Check if text contains action keywords (for @all filtering).
-fn has_action_keyword(text_lower: &str) -> bool {
-    const KEYWORDS: &[&str] = &[
-        "review", "help", "question", "needs", "blocked", "pr ", "pr#",
-    ];
-    KEYWORDS.iter().any(|kw| text_lower.contains(kw))
-}
-
-/// Check if text contains update/announcement keywords.
+/// Check if text contains update/announcement keywords (tight filter).
 fn has_update_keyword(text_lower: &str) -> bool {
-    const KEYWORDS: &[&str] = &[
-        "shipped", "merged", "complete", "released", "deployed", "done", "launched", "finished",
-    ];
+    const KEYWORDS: &[&str] = &["shipped", "merged", "released", "deployed", "launched"];
     KEYWORDS.iter().any(|kw| text_lower.contains(kw))
 }
 
@@ -473,16 +465,50 @@ mod tests {
         assert!(items.is_empty());
     }
 
+    fn get_posts(db: &Database) -> Vec<Reflection> {
+        db.get_recent_board_posts(24)
+            .expect("get_recent_board_posts")
+    }
+
     #[test]
     fn team_needs_picks_up_signals() {
         let (db, _index, _dir) = test_storage();
         db.insert_reflection("mail", "@kelex review:ready PR #36 needs your eyes", "team")
             .expect("insert");
 
-        let items = get_team_needs(&db, "kelex").expect("team_needs");
+        let (items, _ids) = get_team_needs(&get_posts(&db), "kelex");
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].category, "REVIEW");
         assert_eq!(items[0].from, "mail");
+    }
+
+    #[test]
+    fn team_needs_excludes_reflect_requests() {
+        let (db, _index, _dir) = test_storage();
+        // Realistic signal: "@legion reflect from eavesdrop -- legion reflect --repo eavesdrop"
+        db.insert_reflection(
+            "eavesdrop",
+            "@legion reflect -- legion reflect --repo eavesdrop --text \"some reflection\"",
+            "team",
+        )
+        .expect("insert");
+
+        let (items, _ids) = get_team_needs(&get_posts(&db), "legion");
+        assert!(items.is_empty(), "reflect requests should be filtered out");
+    }
+
+    #[test]
+    fn team_needs_excludes_boost_requests() {
+        let (db, _index, _dir) = test_storage();
+        db.insert_reflection(
+            "kelex",
+            "@legion announce -- legion boost --id some-id",
+            "team",
+        )
+        .expect("insert");
+
+        let (items, _ids) = get_team_needs(&get_posts(&db), "legion");
+        assert!(items.is_empty(), "boost requests should be filtered out");
     }
 
     #[test]
@@ -491,7 +517,7 @@ mod tests {
         db.insert_reflection("kelex", "@all review:ready something", "team")
             .expect("insert");
 
-        let items = get_team_needs(&db, "kelex").expect("team_needs");
+        let (items, _ids) = get_team_needs(&get_posts(&db), "kelex");
         assert!(items.is_empty());
     }
 
@@ -501,7 +527,7 @@ mod tests {
         db.insert_reflection("eavesdrop", "@all announce: shipped v1.0 pipeline", "team")
             .expect("insert");
 
-        let items = get_what_changed(&db, "kelex", &[]).expect("what_changed");
+        let items = get_what_changed(&get_posts(&db), "kelex", &[]);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].category, "UPDATE");
         assert_eq!(items[0].from, "eavesdrop");
@@ -513,7 +539,7 @@ mod tests {
         db.insert_reflection("mail", "mail agent shipped core package", "team")
             .expect("insert");
 
-        let items = get_what_changed(&db, "kelex", &[]).expect("what_changed");
+        let items = get_what_changed(&get_posts(&db), "kelex", &[]);
         assert_eq!(items.len(), 1);
         assert!(items[0].text.contains("shipped"));
     }
@@ -524,7 +550,7 @@ mod tests {
         db.insert_reflection("kelex", "kelex shipped something", "team")
             .expect("insert");
 
-        let items = get_what_changed(&db, "kelex", &[]).expect("what_changed");
+        let items = get_what_changed(&get_posts(&db), "kelex", &[]);
         assert!(items.is_empty());
     }
 
@@ -555,10 +581,12 @@ mod tests {
     }
 
     #[test]
-    fn has_action_keyword_matches() {
-        assert!(has_action_keyword("needs review please"));
-        assert!(has_action_keyword("can you help with this"));
-        assert!(!has_action_keyword("just an announcement"));
+    fn is_review_request_matches() {
+        assert!(is_review_request("pr #36 needs review"));
+        assert!(is_review_request("please review pr#42"));
+        assert!(is_review_request("pull request ready for review"));
+        assert!(!is_review_request("needs review please")); // no PR reference
+        assert!(!is_review_request("pr #36 is ready")); // no review keyword
     }
 
     #[test]
