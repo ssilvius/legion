@@ -16,6 +16,7 @@ use crate::db::{Database, ReflectionMeta};
 use crate::error;
 use crate::search::SearchIndex;
 use crate::signal as sig;
+use crate::status;
 
 #[derive(Embed)]
 #[folder = "static/"]
@@ -54,6 +55,7 @@ pub fn run_server(port: u16, data_dir: PathBuf) -> error::Result<()> {
             .route("/api/tasks", get(api_tasks))
             .route("/api/stats", get(api_stats))
             .route("/api/signals", get(api_signals))
+            .route("/api/status", get(api_status))
             .route("/api/post", post(api_post))
             .route("/api/tasks/create", post(api_create_task))
             .route("/api/chat", get(api_chat))
@@ -423,6 +425,33 @@ async fn api_signals(State(state): State<AppState>) -> Response {
         .collect();
 
     Json(items).into_response()
+}
+
+/// Query parameters for GET /api/status.
+#[derive(serde::Deserialize)]
+struct StatusQuery {
+    repo: String,
+}
+
+/// GET /api/status?repo=<name> -- agent status overview.
+async fn api_status(State(state): State<AppState>, Query(params): Query<StatusQuery>) -> Response {
+    let repo = params.repo.trim();
+    if repo.is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "repo parameter is required");
+    }
+
+    let db = match open_db(&state.data_dir) {
+        Ok(db) => db,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
+    };
+
+    match status::get_status(&db, repo) {
+        Ok(output) => Json(output).into_response(),
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("status error: {e}"),
+        ),
+    }
 }
 
 /// Request body for POST /api/post.

@@ -783,6 +783,20 @@ impl Database {
             .map_err(LegionError::Database)
     }
 
+    /// Get active (pending, accepted, blocked) tasks assigned to a repo.
+    ///
+    /// Used by `legion status` to show the YOUR WORK section.
+    pub fn get_active_tasks_for_repo(&self, repo: &str) -> Result<Vec<crate::task::Task>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, from_repo, to_repo, text, context, priority, status, note, created_at, updated_at \
+             FROM tasks WHERE to_repo = ?1 AND status IN ('pending', 'accepted', 'blocked') \
+             ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'med' THEN 1 WHEN 'low' THEN 2 END, created_at DESC",
+        )?;
+        let rows = stmt.query_map([repo], crate::task::map_task_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
     /// Get the most recent created_at timestamp from reflections.
     pub fn get_max_created_at(&self) -> Result<Option<String>> {
         let mut stmt = self
