@@ -58,6 +58,9 @@ pub fn run_server(port: u16, data_dir: PathBuf) -> error::Result<()> {
             .route("/api/tasks/create", post(api_create_task))
             .route("/api/chat", get(api_chat))
             .route("/api/boost/{id}", post(api_boost))
+            .route("/api/schedules", get(api_schedules))
+            .route("/api/schedules/create", post(api_create_schedule))
+            .route("/api/schedules/{id}/toggle", post(api_toggle_schedule))
             .route("/{*path}", get(static_handler))
             .with_state(state);
 
@@ -149,6 +152,31 @@ async fn sse_handler(
                     && let Ok(json) = serde_json::to_string(&tasks)
                 {
                     yield Ok(Event::default().event("tasks").data(json));
+                }
+            }
+
+            // Check for due schedules and fire them
+            if let Ok(due) = db.get_due_schedules() {
+                for schedule in &due {
+                    // Post to bullpen
+                    if let Ok(reflection) = db.insert_reflection_with_meta(
+                        &schedule.repo,
+                        &schedule.command,
+                        "team",
+                        &ReflectionMeta::default(),
+                    ) {
+                        // Best-effort add to search index
+                        if let Ok(index) = SearchIndex::open(&state.data_dir.join("index"))
+                            && let Err(e) = index.add(&reflection.id, &reflection.repo, &schedule.command)
+                        {
+                            eprintln!("[legion] search index add failed for schedule: {e}");
+                        }
+                        eprintln!("[legion] schedule fired: {}", schedule.name);
+                    }
+                    // Mark as run regardless of post success to avoid infinite retries
+                    if let Err(e) = db.mark_schedule_run(&schedule.id) {
+                        eprintln!("[legion] failed to mark schedule run: {e}");
+                    }
                 }
             }
 
@@ -613,6 +641,96 @@ async fn api_chat(State(state): State<AppState>, Query(params): Query<ChatQuery>
     }
 
     Json(messages).into_response()
+}
+
+/// GET /api/schedules -- list all schedules.
+async fn api_schedules(State(state): State<AppState>) -> Response {
+    let db = match open_db(&state.data_dir) {
+        Ok(db) => db,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
+    };
+
+    match db.list_schedules() {
+        Ok(schedules) => Json(schedules).into_response(),
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("query error: {e}"),
+        ),
+    }
+}
+
+/// Request body for POST /api/schedules/create.
+#[derive(serde::Deserialize)]
+struct CreateScheduleRequest {
+    name: String,
+    cron: String,
+    command: String,
+    repo: String,
+}
+
+/// POST /api/schedules/create -- create a new schedule.
+async fn api_create_schedule(
+    State(state): State<AppState>,
+    Json(body): Json<CreateScheduleRequest>,
+) -> Response {
+    let name = body.name.trim();
+    if name.is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "name is required");
+    }
+    let command = body.command.trim();
+    if command.is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "command is required");
+    }
+
+    let db = match open_db(&state.data_dir) {
+        Ok(db) => db,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
+    };
+
+    match db.insert_schedule(name, &body.cron, command, &body.repo) {
+        Ok(id) => Json(serde_json::json!({"ok": true, "id": id})).into_response(),
+        Err(e) => json_error(StatusCode::BAD_REQUEST, &format!("create error: {e}")),
+    }
+}
+
+/// POST /api/schedules/:id/toggle -- toggle a schedule's enabled state.
+async fn api_toggle_schedule(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    let db = match open_db(&state.data_dir) {
+        Ok(db) => db,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
+    };
+
+    // Read current state to toggle it
+    let schedules = match db.list_schedules() {
+        Ok(s) => s,
+        Err(e) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("query error: {e}"),
+            );
+        }
+    };
+
+    let current = schedules.iter().find(|s| s.id == id);
+    match current {
+        None => json_error(StatusCode::NOT_FOUND, "schedule not found"),
+        Some(s) => {
+            let new_enabled = !s.enabled;
+            match db.toggle_schedule(&id, new_enabled) {
+                Ok(true) => {
+                    Json(serde_json::json!({"ok": true, "enabled": new_enabled})).into_response()
+                }
+                Ok(false) => json_error(StatusCode::NOT_FOUND, "schedule not found"),
+                Err(e) => json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("toggle error: {e}"),
+                ),
+            }
+        }
+    }
 }
 
 async fn shutdown_signal() {

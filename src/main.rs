@@ -227,6 +227,12 @@ enum Commands {
         #[command(subcommand)]
         action: TaskAction,
     },
+
+    /// Manage scheduled bullpen posts
+    Schedule {
+        #[command(subcommand)]
+        action: ScheduleAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -297,6 +303,52 @@ enum TaskAction {
     /// Unblock a blocked task (returns to accepted)
     Unblock {
         /// Task ID
+        #[arg(long)]
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ScheduleAction {
+    /// Create a new scheduled bullpen post
+    Create {
+        /// Human-readable name for the schedule
+        #[arg(long)]
+        name: String,
+
+        /// Cron expression: "HH:MM" for daily or "*/Nm" for every N minutes
+        #[arg(long)]
+        cron: String,
+
+        /// Text to post to the bullpen when the schedule fires
+        #[arg(long)]
+        command: String,
+
+        /// Repository name for the post
+        #[arg(long)]
+        repo: String,
+    },
+
+    /// List all schedules
+    List,
+
+    /// Enable a schedule
+    Enable {
+        /// Schedule ID
+        #[arg(long)]
+        id: String,
+    },
+
+    /// Disable a schedule
+    Disable {
+        /// Schedule ID
+        #[arg(long)]
+        id: String,
+    },
+
+    /// Delete a schedule
+    Delete {
+        /// Schedule ID
         #[arg(long)]
         id: String,
     },
@@ -740,6 +792,67 @@ fn main() -> error::Result<()> {
                 TaskAction::Unblock { id } => {
                     task::unblock_task(&database, &id)?;
                     eprintln!("[legion] task unblocked: {}", id);
+                }
+            }
+        }
+        Commands::Schedule { action } => {
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+
+            match action {
+                ScheduleAction::Create {
+                    name,
+                    cron,
+                    command,
+                    repo,
+                } => {
+                    let id = database.insert_schedule(&name, &cron, &command, &repo)?;
+                    eprintln!("[legion] schedule created: {} ({})", name, id);
+                }
+                ScheduleAction::List => {
+                    let schedules = database.list_schedules()?;
+                    if schedules.is_empty() {
+                        eprintln!("[legion] no schedules");
+                    } else {
+                        println!("[Legion] Schedules:");
+                        for s in &schedules {
+                            let status = if s.enabled { "on" } else { "off" };
+                            let next = if s.enabled { &s.next_run } else { "-" };
+                            let truncated: String = s.command.chars().take(20).collect();
+                            let ellipsis = if s.command.len() > 20 { "..." } else { "" };
+                            println!(
+                                "  [{status}] {cron:<6} {name:<20} \"{text}{ellip}\"  ({repo})  next: {next}",
+                                status = status,
+                                cron = s.cron,
+                                name = s.name,
+                                text = truncated,
+                                ellip = ellipsis,
+                                repo = s.repo,
+                                next = next,
+                            );
+                        }
+                    }
+                }
+                ScheduleAction::Enable { id } => {
+                    if database.toggle_schedule(&id, true)? {
+                        eprintln!("[legion] schedule enabled: {}", id);
+                    } else {
+                        eprintln!("[legion] schedule not found: {}", id);
+                    }
+                }
+                ScheduleAction::Disable { id } => {
+                    if database.toggle_schedule(&id, false)? {
+                        eprintln!("[legion] schedule disabled: {}", id);
+                    } else {
+                        eprintln!("[legion] schedule not found: {}", id);
+                    }
+                }
+                ScheduleAction::Delete { id } => {
+                    if database.delete_schedule(&id)? {
+                        eprintln!("[legion] schedule deleted: {}", id);
+                    } else {
+                        eprintln!("[legion] schedule not found: {}", id);
+                    }
                 }
             }
         }

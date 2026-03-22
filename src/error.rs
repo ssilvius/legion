@@ -44,6 +44,12 @@ pub enum LegionError {
 
     #[error("server error: {0}")]
     Server(String),
+
+    #[error("invalid cron expression: {0}")]
+    InvalidCron(String),
+
+    #[error("schedule not found: {0}")]
+    ScheduleNotFound(String),
 }
 
 pub type Result<T> = std::result::Result<T, LegionError>;

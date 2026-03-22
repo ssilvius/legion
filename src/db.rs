@@ -77,12 +77,92 @@ fn map_reflection_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Reflection> {
     })
 }
 
+/// Map a database row to a Schedule struct.
+fn map_schedule_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Schedule> {
+    let enabled_int: i32 = row.get(5)?;
+    Ok(Schedule {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        cron: row.get(2)?,
+        command: row.get(3)?,
+        repo: row.get(4)?,
+        enabled: enabled_int != 0,
+        last_run: row.get(6)?,
+        next_run: row.get(7)?,
+        created_at: row.get(8)?,
+    })
+}
+
 /// Optional metadata for a new reflection (Phase 2.0 Synapse fields).
 #[derive(Default)]
 pub struct ReflectionMeta {
     pub domain: Option<String>,
     pub tags: Option<String>,
     pub parent_id: Option<String>,
+}
+
+/// A scheduled command that fires on a cron-like schedule.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Schedule {
+    pub id: String,
+    pub name: String,
+    pub cron: String,
+    pub command: String,
+    pub repo: String,
+    pub enabled: bool,
+    pub last_run: Option<String>,
+    pub next_run: String,
+    pub created_at: String,
+}
+
+/// Parse a simple cron expression and compute the next run time from `now`.
+///
+/// Supported formats:
+/// - `HH:MM` -- daily at that time (UTC)
+/// - `*/Nm` -- every N minutes from now
+pub fn compute_next_run(cron: &str, now: chrono::DateTime<Utc>) -> Result<chrono::DateTime<Utc>> {
+    if let Some(stripped) = cron.strip_prefix("*/") {
+        // Interval format: */Nm
+        let minutes_str = stripped
+            .strip_suffix('m')
+            .ok_or_else(|| LegionError::InvalidCron(cron.to_string()))?;
+        let minutes: i64 = minutes_str
+            .parse()
+            .map_err(|_| LegionError::InvalidCron(cron.to_string()))?;
+        if minutes <= 0 {
+            return Err(LegionError::InvalidCron(cron.to_string()));
+        }
+        Ok(now + chrono::Duration::minutes(minutes))
+    } else {
+        // Daily format: HH:MM
+        let parts: Vec<&str> = cron.split(':').collect();
+        if parts.len() != 2 {
+            return Err(LegionError::InvalidCron(cron.to_string()));
+        }
+        let hour: u32 = parts[0]
+            .parse()
+            .map_err(|_| LegionError::InvalidCron(cron.to_string()))?;
+        let minute: u32 = parts[1]
+            .parse()
+            .map_err(|_| LegionError::InvalidCron(cron.to_string()))?;
+        if hour >= 24 || minute >= 60 {
+            return Err(LegionError::InvalidCron(cron.to_string()));
+        }
+
+        let today = now
+            .date_naive()
+            .and_hms_opt(hour, minute, 0)
+            .ok_or_else(|| LegionError::InvalidCron(cron.to_string()))?;
+        let today_utc = today.and_utc();
+
+        if today_utc > now {
+            Ok(today_utc)
+        } else {
+            // Tomorrow at that time
+            let tomorrow = today_utc + chrono::Duration::days(1);
+            Ok(tomorrow)
+        }
+    }
 }
 
 impl Database {
@@ -190,6 +270,21 @@ impl Database {
             );
             CREATE INDEX IF NOT EXISTS idx_tasks_to ON tasks(to_repo, status);
             CREATE INDEX IF NOT EXISTS idx_tasks_from ON tasks(from_repo, status);",
+        )?;
+
+        // Migration 4: Schedules table for cron-like scheduled posts.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS schedules (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                cron TEXT NOT NULL,
+                command TEXT NOT NULL,
+                repo TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                last_run TEXT,
+                next_run TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );",
         )?;
 
         Ok(())
@@ -706,6 +801,100 @@ impl Database {
             .query_row([], |row| row.get(0))
             .map_err(LegionError::Database)?;
         Ok(result)
+    }
+
+    // --- Schedule CRUD ---
+
+    /// Insert a new schedule. Validates the cron expression and computes next_run.
+    pub fn insert_schedule(
+        &self,
+        name: &str,
+        cron: &str,
+        command: &str,
+        repo: &str,
+    ) -> Result<String> {
+        let now = Utc::now();
+        let next_run = compute_next_run(cron, now)?;
+        let id = Uuid::now_v7().to_string();
+        let created_at = now.to_rfc3339();
+        let next_run_str = next_run.to_rfc3339();
+
+        self.conn.execute(
+            "INSERT INTO schedules (id, name, cron, command, repo, enabled, next_run, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7)",
+            rusqlite::params![&id, name, cron, command, repo, &next_run_str, &created_at],
+        )?;
+
+        Ok(id)
+    }
+
+    /// Get all schedules that are enabled and due (next_run <= now).
+    pub fn get_due_schedules(&self) -> Result<Vec<Schedule>> {
+        let now = Utc::now().to_rfc3339();
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, cron, command, repo, enabled, last_run, next_run, created_at \
+             FROM schedules WHERE enabled = 1 AND next_run <= ?1",
+        )?;
+        let rows = stmt.query_map([&now], map_schedule_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
+    /// Mark a schedule as having just run. Updates last_run and computes next next_run.
+    pub fn mark_schedule_run(&self, id: &str) -> Result<()> {
+        // Fetch the cron expression to compute the next run
+        let cron: String = self
+            .conn
+            .query_row("SELECT cron FROM schedules WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    LegionError::ScheduleNotFound(id.to_string())
+                }
+                other => LegionError::Database(other),
+            })?;
+
+        let now = Utc::now();
+        let next_run = compute_next_run(&cron, now)?;
+        let now_str = now.to_rfc3339();
+        let next_run_str = next_run.to_rfc3339();
+
+        self.conn.execute(
+            "UPDATE schedules SET last_run = ?1, next_run = ?2 WHERE id = ?3",
+            rusqlite::params![&now_str, &next_run_str, id],
+        )?;
+
+        Ok(())
+    }
+
+    /// List all schedules.
+    pub fn list_schedules(&self) -> Result<Vec<Schedule>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, cron, command, repo, enabled, last_run, next_run, created_at \
+             FROM schedules ORDER BY created_at",
+        )?;
+        let rows = stmt.query_map([], map_schedule_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
+    /// Toggle a schedule's enabled state. Returns false if schedule not found.
+    pub fn toggle_schedule(&self, id: &str, enabled: bool) -> Result<bool> {
+        let enabled_int: i32 = if enabled { 1 } else { 0 };
+        let rows = self.conn.execute(
+            "UPDATE schedules SET enabled = ?1 WHERE id = ?2",
+            rusqlite::params![enabled_int, id],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Delete a schedule by ID. Returns false if schedule not found.
+    pub fn delete_schedule(&self, id: &str) -> Result<bool> {
+        let rows = self
+            .conn
+            .execute("DELETE FROM schedules WHERE id = ?1", [id])?;
+        Ok(rows > 0)
     }
 
     /// Get recently extended learning chains.
