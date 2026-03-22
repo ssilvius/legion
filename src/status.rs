@@ -44,6 +44,36 @@ pub fn get_status(db: &Database, repo: &str) -> Result<StatusOutput> {
     })
 }
 
+/// Result of a `legion done` operation.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DoneResult {
+    pub announcement: String,
+    pub notified: Vec<String>,
+}
+
+/// Find agents who mentioned being blocked on this repo in recent bullpen posts.
+pub fn find_blocked_agents(db: &Database, repo: &str) -> Result<Vec<String>> {
+    let posts: Vec<Reflection> = db.get_recent_board_posts(24)?;
+    let repo_lower: String = repo.to_lowercase();
+    let blocked_pattern: String = format!("blocked on {}", repo_lower);
+    let waiting_pattern: String = format!("waiting on {}", repo_lower);
+    let mut agents: Vec<String> = Vec::new();
+
+    for p in &posts {
+        if p.repo.to_lowercase() == repo_lower {
+            continue;
+        }
+        let text_lower: String = p.text.to_lowercase();
+        if (text_lower.contains(&blocked_pattern) || text_lower.contains(&waiting_pattern))
+            && !agents.contains(&p.repo)
+        {
+            agents.push(p.repo.clone());
+        }
+    }
+
+    Ok(agents)
+}
+
 /// Format status output for terminal display.
 pub fn format_status(output: &StatusOutput) -> String {
     if output.your_work.is_empty() && output.team_needs.is_empty() && output.what_changed.is_empty()

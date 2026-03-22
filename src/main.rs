@@ -230,6 +230,17 @@ enum Commands {
         repo: String,
     },
 
+    /// Announce completed work and notify blocked agents
+    Done {
+        /// Repository name
+        #[arg(long)]
+        repo: String,
+
+        /// Description of what was completed
+        #[arg(long)]
+        text: String,
+    },
+
     /// Manage delegated tasks between agents
     Task {
         #[command(subcommand)]
@@ -761,6 +772,46 @@ fn main() -> error::Result<()> {
                 );
             } else {
                 print!("{formatted}");
+            }
+        }
+        Commands::Done { repo, text } => {
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+            let index = search::SearchIndex::open(&base.join("index"))?;
+
+            // Post completion announcement to bullpen
+            let announcement = format!("{repo} completed: {text}");
+            let reflection = database.insert_reflection_with_meta(
+                &repo,
+                &announcement,
+                "team",
+                &db::ReflectionMeta::default(),
+            )?;
+            if let Err(e) = index.add(&reflection.id, &reflection.repo, &announcement) {
+                eprintln!("[legion] search index add failed: {e}");
+            }
+            eprintln!("[legion] done: {text}");
+
+            // Find and notify blocked agents
+            let blocked_agents = status::find_blocked_agents(&database, &repo)?;
+            for agent in &blocked_agents {
+                let notify_text = format!(
+                    "@{agent} announce from {repo} -- {repo} completed: {text}. Your blocker may be cleared."
+                );
+                let notify_ref = database.insert_reflection_with_meta(
+                    &repo,
+                    &notify_text,
+                    "team",
+                    &db::ReflectionMeta::default(),
+                )?;
+                if let Err(e) = index.add(&notify_ref.id, &notify_ref.repo, &notify_text) {
+                    eprintln!("[legion] search index add failed: {e}");
+                }
+                eprintln!("[legion] notified {agent} (was blocked on {repo})");
+            }
+
+            if blocked_agents.is_empty() {
+                eprintln!("[legion] no blocked agents found");
             }
         }
         Commands::Task { action } => {

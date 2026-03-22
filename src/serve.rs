@@ -56,6 +56,7 @@ pub fn run_server(port: u16, data_dir: PathBuf) -> error::Result<()> {
             .route("/api/stats", get(api_stats))
             .route("/api/signals", get(api_signals))
             .route("/api/status", get(api_status))
+            .route("/api/done", post(api_done))
             .route("/api/post", post(api_post))
             .route("/api/tasks/create", post(api_create_task))
             .route("/api/chat", get(api_chat))
@@ -452,6 +453,78 @@ async fn api_status(State(state): State<AppState>, Query(params): Query<StatusQu
             &format!("status error: {e}"),
         ),
     }
+}
+
+/// Request body for POST /api/done.
+#[derive(serde::Deserialize)]
+struct DoneRequest {
+    repo: String,
+    text: String,
+}
+
+/// POST /api/done -- announce completed work and notify blocked agents.
+async fn api_done(State(state): State<AppState>, Json(body): Json<DoneRequest>) -> Response {
+    let repo = body.repo.trim();
+    let text = body.text.trim();
+    if repo.is_empty() || text.is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "repo and text are required");
+    }
+
+    let db = match open_db(&state.data_dir) {
+        Ok(db) => db,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
+    };
+
+    let index = match open_search_index(&state.data_dir) {
+        Ok(idx) => idx,
+        Err(_) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to open search index",
+            );
+        }
+    };
+
+    // Post completion announcement
+    let announcement = format!("{repo} completed: {text}");
+    let reflection = match db.insert_reflection_with_meta(
+        repo,
+        &announcement,
+        "team",
+        &ReflectionMeta::default(),
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("insert error: {e}"),
+            );
+        }
+    };
+
+    let _ = index.add(&reflection.id, &reflection.repo, &announcement);
+
+    // Find and notify blocked agents
+    let blocked_agents = status::find_blocked_agents(&db, repo).unwrap_or_default();
+
+    let mut notified: Vec<String> = Vec::new();
+    for agent in &blocked_agents {
+        let notify_text = format!(
+            "@{agent} announce from {repo} -- {repo} completed: {text}. Your blocker may be cleared."
+        );
+        if let Ok(r) =
+            db.insert_reflection_with_meta(repo, &notify_text, "team", &ReflectionMeta::default())
+        {
+            let _ = index.add(&r.id, &r.repo, &notify_text);
+            notified.push(agent.clone());
+        }
+    }
+
+    Json(status::DoneResult {
+        announcement,
+        notified,
+    })
+    .into_response()
 }
 
 /// Request body for POST /api/post.
