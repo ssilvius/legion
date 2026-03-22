@@ -23,11 +23,15 @@ pub struct StatusOutput {
     pub what_changed: Vec<StatusItem>,
 }
 
-/// Hours to look back for team posts.
+/// Hours to look back for team posts in status output.
 const LOOKBACK_HOURS: i64 = 8;
-/// Maximum items per section.
+/// Hours to look back for the focused needs query.
+const NEEDS_LOOKBACK_HOURS: i64 = 24;
+/// Maximum items per section in status output.
 const MAX_NEEDS: usize = 10;
 const MAX_CHANGED: usize = 10;
+/// Maximum items in the focused needs query.
+const MAX_NEEDS_FOCUSED: usize = 20;
 
 /// Gather the full status for a repo.
 pub fn get_status(db: &Database, repo: &str) -> Result<StatusOutput> {
@@ -42,6 +46,32 @@ pub fn get_status(db: &Database, repo: &str) -> Result<StatusOutput> {
         team_needs,
         what_changed,
     })
+}
+
+/// Gather focused team needs for a repo (wider lookback, more items than status).
+/// Used by `legion needs` when an agent is idle and looking for ways to help.
+pub fn get_needs(db: &Database, repo: &str) -> Result<Vec<StatusItem>> {
+    let posts: Vec<Reflection> = db.get_recent_board_posts(NEEDS_LOOKBACK_HOURS)?;
+    let (items, _seen_ids) = get_team_needs_with_limit(&posts, repo, MAX_NEEDS_FOCUSED);
+    Ok(items)
+}
+
+/// Format needs output for terminal display.
+pub fn format_needs(repo: &str, items: &[StatusItem]) -> String {
+    if items.is_empty() {
+        return format!(
+            "[Legion] No team needs for {repo}. Check `gh issue list` for your own backlog."
+        );
+    }
+
+    let mut out = format!("[Legion] Team needs ({repo}):\n\n");
+    for item in items {
+        out.push_str(&format!(
+            "  [{}] {}  (from: {}, {})\n",
+            item.category, item.text, item.from, item.age
+        ));
+    }
+    out
 }
 
 /// Format status output for terminal display.
@@ -97,13 +127,22 @@ fn get_your_work(db: &Database, repo: &str) -> Result<Vec<StatusItem>> {
 /// TEAM NEEDS YOU: recent posts with actionable requests directed at this repo.
 /// Returns items and the set of post IDs included (for dedup in what_changed).
 fn get_team_needs(posts: &[Reflection], repo: &str) -> (Vec<StatusItem>, Vec<String>) {
+    get_team_needs_with_limit(posts, repo, MAX_NEEDS)
+}
+
+/// Shared implementation for team needs with configurable limit.
+fn get_team_needs_with_limit(
+    posts: &[Reflection],
+    repo: &str,
+    limit: usize,
+) -> (Vec<StatusItem>, Vec<String>) {
     let repo_lower: String = repo.to_lowercase();
     let at_repo: String = format!("@{}", repo_lower);
     let mut items: Vec<StatusItem> = Vec::new();
     let mut seen_ids: Vec<String> = Vec::new();
 
     for p in posts {
-        if items.len() >= MAX_NEEDS {
+        if items.len() >= limit {
             break;
         }
 

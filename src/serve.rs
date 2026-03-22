@@ -56,6 +56,7 @@ pub fn run_server(port: u16, data_dir: PathBuf) -> error::Result<()> {
             .route("/api/stats", get(api_stats))
             .route("/api/signals", get(api_signals))
             .route("/api/status", get(api_status))
+            .route("/api/needs", get(api_needs))
             .route("/api/post", post(api_post))
             .route("/api/tasks/create", post(api_create_task))
             .route("/api/chat", get(api_chat))
@@ -450,6 +451,27 @@ async fn api_status(State(state): State<AppState>, Query(params): Query<StatusQu
         Err(e) => json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("status error: {e}"),
+        ),
+    }
+}
+
+/// GET /api/needs?repo=<name> -- team help opportunities for an agent.
+async fn api_needs(State(state): State<AppState>, Query(params): Query<StatusQuery>) -> Response {
+    let repo = params.repo.trim();
+    if repo.is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "repo parameter is required");
+    }
+
+    let db = match open_db(&state.data_dir) {
+        Ok(db) => db,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
+    };
+
+    match status::get_needs(&db, repo) {
+        Ok(items) => Json(items).into_response(),
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("needs error: {e}"),
         ),
     }
 }
