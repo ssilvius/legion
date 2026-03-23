@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use chrono::Utc;
+use chrono::{Timelike, Utc};
 use rusqlite::Connection;
 use uuid::Uuid;
 
@@ -90,6 +90,8 @@ fn map_schedule_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Schedule> {
         last_run: row.get(6)?,
         next_run: row.get(7)?,
         created_at: row.get(8)?,
+        active_start: row.get(9)?,
+        active_end: row.get(10)?,
     })
 }
 
@@ -113,6 +115,59 @@ pub struct Schedule {
     pub last_run: Option<String>,
     pub next_run: String,
     pub created_at: String,
+    pub active_start: Option<String>,
+    pub active_end: Option<String>,
+}
+
+/// Parse an HH:MM string into minutes since midnight. Returns None if invalid.
+fn parse_hhmm(s: &str) -> Option<u32> {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let h: u32 = parts[0].parse().ok()?;
+    let m: u32 = parts[1].parse().ok()?;
+    if h >= 24 || m >= 60 {
+        return None;
+    }
+    Some(h * 60 + m)
+}
+
+/// Validate an HH:MM time string. Returns an error with a descriptive message if invalid.
+pub fn validate_hhmm(s: &str) -> Result<()> {
+    if parse_hhmm(s).is_none() {
+        return Err(LegionError::InvalidCron(format!(
+            "invalid time format '{s}': expected HH:MM with hours 0-23 and minutes 0-59"
+        )));
+    }
+    Ok(())
+}
+
+/// Check if a schedule is within its active time window.
+/// Handles overnight windows (e.g., 23:00-07:00 crosses midnight).
+/// Schedules without a window are always active.
+fn is_in_active_window(schedule: &Schedule, now: &chrono::DateTime<Utc>) -> bool {
+    let (start_str, end_str) = match (&schedule.active_start, &schedule.active_end) {
+        (Some(s), Some(e)) => (s.as_str(), e.as_str()),
+        _ => return true,
+    };
+
+    let start_minutes: u32 = match parse_hhmm(start_str) {
+        Some(v) => v,
+        None => return true,
+    };
+    let end_minutes: u32 = match parse_hhmm(end_str) {
+        Some(v) => v,
+        None => return true,
+    };
+
+    let now_minutes: u32 = now.hour() * 60 + now.minute();
+
+    if start_minutes <= end_minutes {
+        now_minutes >= start_minutes && now_minutes < end_minutes
+    } else {
+        now_minutes >= start_minutes || now_minutes < end_minutes
+    }
 }
 
 /// Parse a simple cron expression and compute the next run time from `now`.
@@ -286,6 +341,14 @@ impl Database {
                 created_at TEXT NOT NULL
             );",
         )?;
+
+        // Migration 5: Add time window columns to schedules.
+        if !Self::has_column(conn, "schedules", "active_start")? {
+            conn.execute_batch("ALTER TABLE schedules ADD COLUMN active_start TEXT;")?;
+        }
+        if !Self::has_column(conn, "schedules", "active_end")? {
+            conn.execute_batch("ALTER TABLE schedules ADD COLUMN active_end TEXT;")?;
+        }
 
         Ok(())
     }
@@ -819,14 +882,24 @@ impl Database {
 
     // --- Schedule CRUD ---
 
-    /// Insert a new schedule. Validates the cron expression and computes next_run.
+    /// Insert a new schedule. Validates the cron expression and time window, computes next_run.
     pub fn insert_schedule(
         &self,
         name: &str,
         cron: &str,
         command: &str,
         repo: &str,
+        active_start: Option<&str>,
+        active_end: Option<&str>,
     ) -> Result<String> {
+        // Validate time window if provided
+        if let Some(s) = active_start {
+            validate_hhmm(s)?;
+        }
+        if let Some(e) = active_end {
+            validate_hhmm(e)?;
+        }
+
         let now = Utc::now();
         let next_run = compute_next_run(cron, now)?;
         let id = Uuid::now_v7().to_string();
@@ -834,24 +907,33 @@ impl Database {
         let next_run_str = next_run.to_rfc3339();
 
         self.conn.execute(
-            "INSERT INTO schedules (id, name, cron, command, repo, enabled, next_run, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7)",
-            rusqlite::params![&id, name, cron, command, repo, &next_run_str, &created_at],
+            "INSERT INTO schedules (id, name, cron, command, repo, enabled, next_run, created_at, active_start, active_end) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7, ?8, ?9)",
+            rusqlite::params![&id, name, cron, command, repo, &next_run_str, &created_at, active_start, active_end],
         )?;
 
         Ok(id)
     }
 
-    /// Get all schedules that are enabled and due (next_run <= now).
+    /// Get all schedules that are enabled, due (next_run <= now), and within
+    /// their active time window (if set).
     pub fn get_due_schedules(&self) -> Result<Vec<Schedule>> {
-        let now = Utc::now().to_rfc3339();
+        let now = Utc::now();
+        let now_str = now.to_rfc3339();
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, cron, command, repo, enabled, last_run, next_run, created_at \
+            "SELECT id, name, cron, command, repo, enabled, last_run, next_run, created_at, active_start, active_end \
              FROM schedules WHERE enabled = 1 AND next_run <= ?1",
         )?;
-        let rows = stmt.query_map([&now], map_schedule_row)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(LegionError::Database)
+        let rows = stmt.query_map([&now_str], map_schedule_row)?;
+        let all: Vec<Schedule> = rows
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)?;
+
+        // Filter by active time window
+        Ok(all
+            .into_iter()
+            .filter(|s| is_in_active_window(s, &now))
+            .collect())
     }
 
     /// Mark a schedule as having just run. Updates last_run and computes next next_run.
@@ -885,7 +967,7 @@ impl Database {
     /// List all schedules.
     pub fn list_schedules(&self) -> Result<Vec<Schedule>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, cron, command, repo, enabled, last_run, next_run, created_at \
+            "SELECT id, name, cron, command, repo, enabled, last_run, next_run, created_at, active_start, active_end \
              FROM schedules ORDER BY created_at",
         )?;
         let rows = stmt.query_map([], map_schedule_row)?;
@@ -1283,5 +1365,134 @@ mod tests {
         let db = test_db();
         let found = db.get_reflection_by_id("no-such-id").unwrap();
         assert!(found.is_none());
+    }
+
+    #[test]
+    fn parse_hhmm_valid() {
+        assert_eq!(parse_hhmm("00:00"), Some(0));
+        assert_eq!(parse_hhmm("23:59"), Some(23 * 60 + 59));
+        assert_eq!(parse_hhmm("07:30"), Some(7 * 60 + 30));
+    }
+
+    #[test]
+    fn parse_hhmm_invalid() {
+        assert_eq!(parse_hhmm("24:00"), None);
+        assert_eq!(parse_hhmm("12:60"), None);
+        assert_eq!(parse_hhmm("garbage"), None);
+        assert_eq!(parse_hhmm(""), None);
+        assert_eq!(parse_hhmm("12"), None);
+    }
+
+    #[test]
+    fn active_window_no_window_always_active() {
+        let schedule = Schedule {
+            id: String::new(),
+            name: String::new(),
+            cron: String::new(),
+            command: String::new(),
+            repo: String::new(),
+            enabled: true,
+            last_run: None,
+            next_run: String::new(),
+            created_at: String::new(),
+            active_start: None,
+            active_end: None,
+        };
+        let now = Utc::now();
+        assert!(is_in_active_window(&schedule, &now));
+    }
+
+    #[test]
+    fn active_window_same_day() {
+        let mut schedule = Schedule {
+            id: String::new(),
+            name: String::new(),
+            cron: String::new(),
+            command: String::new(),
+            repo: String::new(),
+            enabled: true,
+            last_run: None,
+            next_run: String::new(),
+            created_at: String::new(),
+            active_start: Some("09:00".to_string()),
+            active_end: Some("17:00".to_string()),
+        };
+
+        // 12:00 is within 09:00-17:00
+        let noon = chrono::NaiveDate::from_ymd_opt(2026, 3, 22)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_utc();
+        assert!(is_in_active_window(&schedule, &noon));
+
+        // 08:00 is outside 09:00-17:00
+        let early = chrono::NaiveDate::from_ymd_opt(2026, 3, 22)
+            .unwrap()
+            .and_hms_opt(8, 0, 0)
+            .unwrap()
+            .and_utc();
+        assert!(!is_in_active_window(&schedule, &early));
+
+        // 17:00 is at the boundary (exclusive end)
+        let boundary = chrono::NaiveDate::from_ymd_opt(2026, 3, 22)
+            .unwrap()
+            .and_hms_opt(17, 0, 0)
+            .unwrap()
+            .and_utc();
+        assert!(!is_in_active_window(&schedule, &boundary));
+
+        // Unparseable window falls back to always active
+        schedule.active_start = Some("garbage".to_string());
+        assert!(is_in_active_window(&schedule, &noon));
+    }
+
+    #[test]
+    fn active_window_overnight() {
+        let schedule = Schedule {
+            id: String::new(),
+            name: String::new(),
+            cron: String::new(),
+            command: String::new(),
+            repo: String::new(),
+            enabled: true,
+            last_run: None,
+            next_run: String::new(),
+            created_at: String::new(),
+            active_start: Some("23:00".to_string()),
+            active_end: Some("07:00".to_string()),
+        };
+
+        // 01:00 is within 23:00-07:00 (after midnight)
+        let late_night = chrono::NaiveDate::from_ymd_opt(2026, 3, 22)
+            .unwrap()
+            .and_hms_opt(1, 0, 0)
+            .unwrap()
+            .and_utc();
+        assert!(is_in_active_window(&schedule, &late_night));
+
+        // 23:30 is within 23:00-07:00 (before midnight)
+        let before_midnight = chrono::NaiveDate::from_ymd_opt(2026, 3, 22)
+            .unwrap()
+            .and_hms_opt(23, 30, 0)
+            .unwrap()
+            .and_utc();
+        assert!(is_in_active_window(&schedule, &before_midnight));
+
+        // 12:00 is outside 23:00-07:00
+        let noon = chrono::NaiveDate::from_ymd_opt(2026, 3, 22)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_utc();
+        assert!(!is_in_active_window(&schedule, &noon));
+
+        // 07:00 is at the boundary (exclusive end)
+        let boundary = chrono::NaiveDate::from_ymd_opt(2026, 3, 22)
+            .unwrap()
+            .and_hms_opt(7, 0, 0)
+            .unwrap()
+            .and_utc();
+        assert!(!is_in_active_window(&schedule, &boundary));
     }
 }

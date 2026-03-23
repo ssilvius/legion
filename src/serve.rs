@@ -717,6 +717,8 @@ struct CreateScheduleRequest {
     cron: String,
     command: String,
     repo: String,
+    active_start: Option<String>,
+    active_end: Option<String>,
 }
 
 /// POST /api/schedules/create -- create a new schedule.
@@ -738,7 +740,14 @@ async fn api_create_schedule(
         Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
     };
 
-    match db.insert_schedule(name, &body.cron, command, &body.repo) {
+    match db.insert_schedule(
+        name,
+        &body.cron,
+        command,
+        &body.repo,
+        body.active_start.as_deref(),
+        body.active_end.as_deref(),
+    ) {
         Ok(id) => Json(serde_json::json!({"ok": true, "id": id})).into_response(),
         Err(e) => json_error(StatusCode::BAD_REQUEST, &format!("create error: {e}")),
     }

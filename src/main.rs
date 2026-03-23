@@ -342,6 +342,14 @@ enum ScheduleAction {
         /// Repository name for the post
         #[arg(long)]
         repo: String,
+
+        /// Active window start time (HH:MM UTC). Only fires within the window. Requires --active-end.
+        #[arg(long, requires = "active_end")]
+        active_start: Option<String>,
+
+        /// Active window end time (HH:MM UTC). Only fires within the window. Requires --active-start.
+        #[arg(long, requires = "active_start")]
+        active_end: Option<String>,
     },
 
     /// List all schedules
@@ -840,8 +848,17 @@ fn main() -> error::Result<()> {
                     cron,
                     command,
                     repo,
+                    active_start,
+                    active_end,
                 } => {
-                    let id = database.insert_schedule(&name, &cron, &command, &repo)?;
+                    let id = database.insert_schedule(
+                        &name,
+                        &cron,
+                        &command,
+                        &repo,
+                        active_start.as_deref(),
+                        active_end.as_deref(),
+                    )?;
                     eprintln!("[legion] schedule created: {} ({})", name, id);
                 }
                 ScheduleAction::List => {
@@ -855,8 +872,12 @@ fn main() -> error::Result<()> {
                             let next = if s.enabled { &s.next_run } else { "-" };
                             let truncated: String = s.command.chars().take(20).collect();
                             let ellipsis = if s.command.len() > 20 { "..." } else { "" };
+                            let window = match (&s.active_start, &s.active_end) {
+                                (Some(start), Some(end)) => format!("  window: {start}-{end}"),
+                                _ => String::new(),
+                            };
                             println!(
-                                "  [{status}] {cron:<6} {name:<20} \"{text}{ellip}\"  ({repo})  next: {next}",
+                                "  [{status}] {cron:<6} {name:<20} \"{text}{ellip}\"  ({repo})  next: {next}{window}",
                                 status = status,
                                 cron = s.cron,
                                 name = s.name,
@@ -864,6 +885,7 @@ fn main() -> error::Result<()> {
                                 ellip = ellipsis,
                                 repo = s.repo,
                                 next = next,
+                                window = window,
                             );
                         }
                     }
