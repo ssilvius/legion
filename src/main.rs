@@ -230,6 +230,13 @@ enum Commands {
         repo: String,
     },
 
+    /// Show what the team needs help with
+    Needs {
+        /// Repository name
+        #[arg(long)]
+        repo: String,
+    },
+
     /// Manage delegated tasks between agents
     Task {
         #[command(subcommand)]
@@ -770,6 +777,12 @@ fn main() -> error::Result<()> {
             } else {
                 print!("{formatted}");
             }
+        }
+        Commands::Needs { repo } => {
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+            let items = status::get_needs(&database, &repo)?;
+            print!("{}", status::format_needs(&repo, &items));
         }
         Commands::Task { action } => {
             let base = data_dir()?;
