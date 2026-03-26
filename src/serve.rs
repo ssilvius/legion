@@ -60,6 +60,10 @@ pub fn run_server(port: u16, data_dir: PathBuf) -> error::Result<()> {
             .route("/api/done", post(api_done))
             .route("/api/post", post(api_post))
             .route("/api/tasks/create", post(api_create_task))
+            .route("/api/tasks/{id}/accept", post(api_task_accept))
+            .route("/api/tasks/{id}/done", post(api_task_done))
+            .route("/api/tasks/{id}/block", post(api_task_block))
+            .route("/api/tasks/{id}/unblock", post(api_task_unblock))
             .route("/api/chat", get(api_chat))
             .route("/api/boost/{id}", post(api_boost))
             .route("/api/schedules", get(api_schedules))
@@ -689,6 +693,76 @@ async fn api_create_task(
     };
 
     (StatusCode::CREATED, Json(task)).into_response()
+}
+
+/// Optional request body for task state transitions.
+#[derive(serde::Deserialize, Default)]
+struct TaskTransitionBody {
+    note: Option<String>,
+}
+
+/// POST /api/tasks/:id/accept -- accept a pending task.
+async fn api_task_accept(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    let db = match open_db(&state.data_dir) {
+        Ok(db) => db,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
+    };
+    match crate::task::accept_task(&db, &id) {
+        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
+        Err(e) => json_error(StatusCode::BAD_REQUEST, &format!("{e}")),
+    }
+}
+
+/// POST /api/tasks/:id/done -- complete an accepted task.
+async fn api_task_done(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    body: Option<Json<TaskTransitionBody>>,
+) -> Response {
+    let db = match open_db(&state.data_dir) {
+        Ok(db) => db,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
+    };
+    let note = body.and_then(|b| b.note.clone());
+    match crate::task::complete_task(&db, &id, note.as_deref()) {
+        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
+        Err(e) => json_error(StatusCode::BAD_REQUEST, &format!("{e}")),
+    }
+}
+
+/// POST /api/tasks/:id/block -- block an accepted task.
+async fn api_task_block(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    body: Option<Json<TaskTransitionBody>>,
+) -> Response {
+    let db = match open_db(&state.data_dir) {
+        Ok(db) => db,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
+    };
+    let reason = body.and_then(|b| b.note.clone());
+    match crate::task::block_task(&db, &id, reason.as_deref()) {
+        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
+        Err(e) => json_error(StatusCode::BAD_REQUEST, &format!("{e}")),
+    }
+}
+
+/// POST /api/tasks/:id/unblock -- unblock a blocked task.
+async fn api_task_unblock(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    let db = match open_db(&state.data_dir) {
+        Ok(db) => db,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
+    };
+    match crate::task::unblock_task(&db, &id) {
+        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
+        Err(e) => json_error(StatusCode::BAD_REQUEST, &format!("{e}")),
+    }
 }
 
 /// Query parameters for GET /api/chat.
