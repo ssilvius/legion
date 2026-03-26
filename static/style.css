@@ -520,10 +520,68 @@ main {
   margin-bottom: 8px;
 }
 
+.kanban-card-context {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+  font-style: italic;
+}
+
+.kanban-card-note {
+  font-size: 11px;
+  color: var(--accent);
+  margin-bottom: 6px;
+}
+
 .kanban-card-footer {
   display: flex;
   gap: 8px;
   align-items: center;
+}
+
+.kanban-card-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.kanban-action-btn {
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.kanban-action-btn:hover {
+  background: var(--bg-hover);
+}
+
+.kanban-action-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.kanban-action-accept {
+  border-color: var(--green, #4a9);
+  color: var(--green, #4a9);
+}
+
+.kanban-action-done {
+  border-color: var(--green, #4a9);
+  color: var(--green, #4a9);
+}
+
+.kanban-action-block {
+  border-color: var(--red, #d63);
+  color: var(--red, #d63);
+}
+
+.kanban-action-unblock {
+  border-color: var(--yellow, #da3);
+  color: var(--yellow, #da3);
 }
 
 /* Stats table */

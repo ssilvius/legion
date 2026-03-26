@@ -696,6 +696,22 @@
     return true;
   }
 
+  function getTaskActions(status) {
+    switch (status) {
+      case "pending":
+        return [{ type: "accept", label: "Accept" }];
+      case "accepted":
+        return [
+          { type: "done", label: "Done" },
+          { type: "block", label: "Block" },
+        ];
+      case "blocked":
+        return [{ type: "unblock", label: "Unblock" }];
+      default:
+        return [];
+    }
+  }
+
   function buildKanbanColumns() {
     var frag = document.createDocumentFragment();
     var columns = ["pending", "accepted", "done", "blocked"];
@@ -722,10 +738,54 @@
         var text = el("div", "kanban-card-text", truncate(task.text, 120));
         card.appendChild(text);
 
+        if (task.context) {
+          var ctx = el("div", "kanban-card-context", truncate(task.context, 80));
+          card.appendChild(ctx);
+        }
+
+        if (task.note) {
+          var note = el("div", "kanban-card-note", task.note);
+          card.appendChild(note);
+        }
+
         var footer = el("div", "kanban-card-footer");
         footer.appendChild(el("span", priorityBadgeClass(task.priority), task.priority));
         footer.appendChild(el("span", null, relativeTime(task.created_at)));
         card.appendChild(footer);
+
+        var actions = el("div", "kanban-card-actions");
+        var taskActions = getTaskActions(task.status);
+        taskActions.forEach(function (action) {
+          var btn = el("button", "kanban-action-btn kanban-action-" + action.type, action.label);
+          (function (taskId, actionType, button) {
+            button.addEventListener("click", function () {
+              button.disabled = true;
+              postToApi("/api/tasks/" + taskId + "/" + actionType)
+                .then(function (r) {
+                  if (r.ok) {
+                    fetch("/api/tasks")
+                      .then(function (r) { return r.json(); })
+                      .then(function (data) {
+                        state.tasks = data;
+                        updateKanban();
+                      });
+                  } else {
+                    button.disabled = false;
+                    r.json().then(function (data) {
+                      console.error("[legion] task action failed:", data.error);
+                    });
+                  }
+                })
+                .catch(function () {
+                  button.disabled = false;
+                });
+            });
+          })(task.id, action.type, btn);
+          actions.appendChild(btn);
+        });
+        if (taskActions.length > 0) {
+          card.appendChild(actions);
+        }
 
         cards.appendChild(card);
       });
