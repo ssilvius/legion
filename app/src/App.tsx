@@ -5,6 +5,7 @@ import { Tabs } from "@/src/components/ui/tabs";
 import { StatusBar } from "@/src/components/StatusBar";
 import { AgentStatusRow } from "@/src/components/AgentStatusRow";
 import { KanbanBoard } from "@/src/components/KanbanBoard";
+import { FeedView } from "@/src/components/FeedView";
 import {
   deriveAgentStatus,
   type AgentStatus,
@@ -71,7 +72,7 @@ export function App() {
         </Tabs.Content>
 
         <Tabs.Content value="feed">
-          Feed view -- bullpen, broadcast bar coming in #77
+          <FeedView />
         </Tabs.Content>
 
         <Tabs.Content value="signals">
