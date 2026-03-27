@@ -1,11 +1,49 @@
+import { useCallback, useEffect, useState } from "react";
 import { Container } from "@/src/components/ui/container";
 import { Separator } from "@/src/components/ui/separator";
 import { Tabs } from "@/src/components/ui/tabs";
+import { StatusBar } from "@/src/components/StatusBar";
+import { AgentStatusRow } from "@/src/components/AgentStatusRow";
+import { deriveAgentStatus, type AgentStatus } from "@/src/hooks/useAgentStatus";
+import { useLegion } from "@/src/services";
+import type { AgentInfo, Task } from "@/src/services/types";
 
 export function App() {
+  const legion = useLegion();
+  const [agents, setAgents] = useState<AgentInfo[]>([]);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [agentFilter, setAgentFilter] = useState<string | null>(null);
+
+  const agentStatuses: AgentStatus[] = deriveAgentStatus(agents, tasks);
+
+  // Initial data fetch
+  useEffect(() => {
+    legion.getAgents().then(setAgents).catch(console.error);
+    legion.getTasks().then(setTasks).catch(console.error);
+  }, [legion]);
+
+  // SSE subscription
+  useEffect(() => {
+    return legion.subscribe({
+      onAgents: setAgents,
+      onTasks: setTasks,
+    });
+  }, [legion]);
+
+  const handleFilterAgent = useCallback((repo: string | null) => {
+    setAgentFilter(repo);
+  }, []);
+
   return (
-    <Container as="main" size="6xl" padding="6" gap="6">
+    <Container as="main" size="6xl" padding="6" gap="4">
       <span className="text-lg font-semibold tracking-tight">legion</span>
+
+      <StatusBar agents={agentStatuses} />
+      <AgentStatusRow
+        agents={agentStatuses}
+        activeFilter={agentFilter}
+        onFilterAgent={handleFilterAgent}
+      />
 
       <Separator />
 
@@ -19,7 +57,8 @@ export function App() {
         </Tabs.List>
 
         <Tabs.Content value="tasks">
-          Tasks view -- status bar, agent row, triage, kanban coming in #74-#76
+          Tasks view -- triage, kanban coming in #75-#76
+          {agentFilter ? ` (filtered to ${agentFilter})` : ""}
         </Tabs.Content>
 
         <Tabs.Content value="feed">
