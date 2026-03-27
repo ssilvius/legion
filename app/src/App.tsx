@@ -4,7 +4,11 @@ import { Separator } from "@/src/components/ui/separator";
 import { Tabs } from "@/src/components/ui/tabs";
 import { StatusBar } from "@/src/components/StatusBar";
 import { AgentStatusRow } from "@/src/components/AgentStatusRow";
-import { deriveAgentStatus, type AgentStatus } from "@/src/hooks/useAgentStatus";
+import { KanbanBoard } from "@/src/components/KanbanBoard";
+import {
+  deriveAgentStatus,
+  type AgentStatus,
+} from "@/src/hooks/useAgentStatus";
 import { useLegion } from "@/src/services";
 import type { AgentInfo, Task } from "@/src/services/types";
 
@@ -16,13 +20,15 @@ export function App() {
 
   const agentStatuses: AgentStatus[] = deriveAgentStatus(agents, tasks);
 
-  // Initial data fetch
-  useEffect(() => {
-    legion.getAgents().then(setAgents).catch(console.error);
+  const fetchTasks = useCallback(() => {
     legion.getTasks().then(setTasks).catch(console.error);
   }, [legion]);
 
-  // SSE subscription
+  useEffect(() => {
+    legion.getAgents().then(setAgents).catch(console.error);
+    fetchTasks();
+  }, [legion, fetchTasks]);
+
   useEffect(() => {
     return legion.subscribe({
       onAgents: setAgents,
@@ -57,8 +63,11 @@ export function App() {
         </Tabs.List>
 
         <Tabs.Content value="tasks">
-          Tasks view -- triage, kanban coming in #75-#76
-          {agentFilter ? ` (filtered to ${agentFilter})` : ""}
+          <KanbanBoard
+            tasks={tasks}
+            agentFilter={agentFilter}
+            onTasksChanged={fetchTasks}
+          />
         </Tabs.Content>
 
         <Tabs.Content value="feed">
