@@ -50,6 +50,15 @@ pub enum LegionError {
 
     #[error("schedule not found: {0}")]
     ScheduleNotFound(String),
+
+    #[error("watch config error: {0}")]
+    WatchConfig(String),
+
+    #[error("watch already running (pid {0})")]
+    WatchAlreadyRunning(u32),
+
+    #[error("TOML parse error: {0}")]
+    Toml(#[from] toml::de::Error),
 }
 
 pub type Result<T> = std::result::Result<T, LegionError>;

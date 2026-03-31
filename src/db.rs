@@ -350,6 +350,11 @@ impl Database {
             conn.execute_batch("ALTER TABLE schedules ADD COLUMN active_end TEXT;")?;
         }
 
+        // Migration 6: Add handled_at column for watch auto-wake tracking.
+        if !Self::has_column(conn, "reflections", "handled_at")? {
+            conn.execute_batch("ALTER TABLE reflections ADD COLUMN handled_at TEXT;")?;
+        }
+
         Ok(())
     }
 
@@ -612,6 +617,44 @@ impl Database {
         )?;
 
         Ok(())
+    }
+
+    /// Find unhandled signals directed at a specific repo.
+    ///
+    /// Returns team posts whose text starts with `@<repo_name> ` (case-sensitive)
+    /// or `@all ` that have not yet been marked as handled (`handled_at IS NULL`).
+    pub fn get_unhandled_signals_for_repo(&self, repo_name: &str) -> Result<Vec<Reflection>> {
+        let pattern_specific = format!("@{} %", repo_name);
+        let pattern_all = "@all %";
+        let mut stmt = self.conn.prepare(
+            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, \
+             last_recalled_at, parent_id \
+             FROM reflections \
+             WHERE audience = 'team' \
+               AND handled_at IS NULL \
+               AND (text LIKE ?1 OR text LIKE ?2) \
+               AND repo != ?3 \
+             ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![&pattern_specific, pattern_all, repo_name],
+            map_reflection_row,
+        )?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
+    /// Mark a signal as handled by the watch daemon.
+    ///
+    /// Sets `handled_at` to the current timestamp. Returns true if a row
+    /// was updated, false if the id was not found.
+    pub fn mark_signal_handled(&self, id: &str) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let rows = self.conn.execute(
+            "UPDATE reflections SET handled_at = ?1 WHERE id = ?2 AND handled_at IS NULL",
+            rusqlite::params![&now, id],
+        )?;
+        Ok(rows > 0)
     }
 
     /// Retrieve all reflections for reindexing.
