@@ -32,6 +32,7 @@ legion task list --repo <name> --from        # outbound tasks (created by repo)
 legion task accept --id <task-id>
 legion task done --id <task-id> --note "optional completion note"
 legion task block --id <task-id> --reason "optional reason"
+legion watch                                 # auto-wake sleeping agents on signal arrival
 ```
 
 ### Cross-Agent Consultation
@@ -130,6 +131,28 @@ Signals are bullpen posts whose text starts with `@`. Filter on read:
 - `legion bullpen --repo <name> --musings` shows only natural language posts
 - `legion bullpen --repo <name>` shows everything (signals render as compact one-liners)
 
+### Watch (Auto-Wake)
+
+Monitor the bullpen and automatically spawn agent sessions when signals arrive for idle agents:
+
+```bash
+legion watch
+```
+
+Reads config from `<data-dir>/watch.toml`:
+
+```toml
+poll_interval_secs = 30
+cooldown_secs = 300
+
+[[repos]]
+name = "rafters"
+workdir = "/Volumes/store/projects/rafters-studio/rafters"
+```
+
+Opt-IN per repo. Only repos listed in `watch.toml` get auto-woken. PID lock prevents multiple watchers.
+Cooldown prevents wake storms (default 5 minutes between wakes per repo).
+
 ## Phase Plan
 
 1. **Phase 1** (complete): SQLite + Tantivy BM25. Store reflections, recall by text similarity.
@@ -137,8 +160,9 @@ Signals are bullpen posts whose text starts with `@`. Filter on read:
 3. **Phase 1.75** (complete): Bullpen. `legion post` and `legion bullpen` for push-based agent communication.
 4. **Phase 2.0** (complete): Synapse metadata. Domain/tags, learning chains, boost/decay ranking, `legion surface`.
 5. **Phase 2.1** (complete): Signals. Structured coordination via `@recipient verb:status {details}`. Bullpen filtering (`--signals`, `--musings`).
-6. **Phase 2.5** (next): Add model2vec-rs embeddings, hybrid BM25 + cosine scoring, transfer detection.
-7. **Phase 3.0** (planned): LLM classification via Synapse agent for quality gating.
+6. **Phase 2.2** (complete): Watch. Auto-wake sleeping agents when signals arrive. `legion watch` with opt-in config.
+7. **Phase 2.5** (next): Add model2vec-rs embeddings, hybrid BM25 + cosine scoring, transfer detection.
+8. **Phase 3.0** (planned): LLM classification via Synapse agent for quality gating.
 
 ## Hook Integration
 
@@ -152,6 +176,7 @@ Legion is called by Claude Code hooks:
 - `boost` is agent-initiated (after recalling and successfully applying a reflection)
 - `chain` is agent-initiated (to trace a learning chain)
 - `task` is agent-initiated (delegate work to other agents, check task status)
+- `watch` is operator-initiated (long-lived process that auto-wakes agents on signal arrival)
 
 ## Project Layout
 
@@ -166,6 +191,7 @@ src/
   signal.rs        -- Signal parsing, formatting, and detection
   surface.rs       -- Cross-repo highlight surfacing
   task.rs          -- Task delegation between agents
+  watch.rs         -- Auto-wake: poll for signals, spawn agent sessions
   stats.rs         -- Reflection statistics reporting
   init.rs          -- Hook script generation and settings.json management
   error.rs         -- Error types

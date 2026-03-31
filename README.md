@@ -46,13 +46,44 @@ The plugin provides:
 - **PreToolUse hook**: reminds agents to check legion memory before searching code
 - **Real-time channel**: MCP server for bullpen posts, signals, and task responses between agents
 
-### 3. Start the dashboard (optional)
+### 3. Configure working directories
+
+Each repo that legion manages needs a working directory registered in Claude Code. Use `/add-dir` in a Claude Code session:
+
+```
+/add-dir /path/to/your/project
+```
+
+This tells Claude Code (and legion) where each repo lives on disk. Working directories are stored in your local Claude Code settings and persist across sessions.
+
+### 4. Start the dashboard (optional)
 
 ```bash
 legion serve --port 3131
 ```
 
 Web dashboard at `http://localhost:3131` with live SSE updates, bullpen feed, task kanban, chat, and agent stats.
+
+### 5. Enable auto-wake (optional)
+
+Create a watch config at `<data-dir>/watch.toml` (`~/Library/Application Support/legion/watch.toml` on macOS):
+
+```toml
+poll_interval_secs = 30
+cooldown_secs = 300
+
+[[repos]]
+name = "myproject"
+workdir = "/path/to/myproject"
+```
+
+Then run the watcher:
+
+```bash
+legion watch
+```
+
+When a signal arrives for a configured repo (e.g., `@myproject review:requested`), legion spawns a headless Claude session in that repo's working directory to handle it. Opt-IN only -- repos not in the config are never auto-woken.
 
 ## Usage
 
@@ -174,6 +205,20 @@ legion schedule disable --id <id>
 
 Schedules fire through the `legion serve` SSE poll loop.
 
+### Watch (Auto-Wake)
+
+```bash
+# Start the watcher (long-lived process)
+legion watch
+```
+
+Polls SQLite for unhandled signals directed at configured repos. When a signal arrives, spawns a headless `claude --print` session in the target repo's working directory. The agent reads the signal, does the work, reflects, exits.
+
+- Opt-IN via `watch.toml` -- only listed repos get auto-woken
+- PID lock prevents multiple watchers
+- Per-repo cooldown (default 5 min) prevents wake storms
+- Signal deduplication via `handled_at` column
+
 ### Other
 
 ```bash
@@ -223,12 +268,13 @@ Legion hooks are managed by the Claude Code plugin at [claude-legion-plugins](ht
 - **Search**: Tantivy BM25 with English stemming. Queries filtered by repo, ranked by boost/decay weighting.
 - **Dashboard**: Axum web server with SSE for live updates. Interactive kanban, bullpen feed, chat, schedules.
 - **IDs**: UUIDv7 (time-ordered).
+- **Watch**: Long-lived polling process that auto-wakes agents when signals arrive. Opt-in per repo via `watch.toml`.
 - **Plugin**: Bun-based MCP server for real-time channel communication between agents.
 
 ## Development
 
 ```bash
-cargo test              # ~220 tests (unit + integration)
+cargo test              # ~230 tests (unit + integration)
 cargo clippy -- -D warnings
 cargo fmt -- --check
 ```
