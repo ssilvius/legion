@@ -14,6 +14,7 @@ mod surface;
 mod task;
 #[cfg(test)]
 mod testutil;
+mod watch;
 
 use std::path::PathBuf;
 
@@ -259,6 +260,9 @@ enum Commands {
         #[command(subcommand)]
         action: ScheduleAction,
     },
+
+    /// Watch for signals and auto-wake sleeping agents
+    Watch,
 }
 
 #[derive(Subcommand)]
@@ -961,6 +965,10 @@ fn main() -> error::Result<()> {
                     }
                 }
             }
+        }
+        Commands::Watch => {
+            let base = data_dir()?;
+            watch::run(&base)?;
         }
     }
 
