@@ -208,7 +208,12 @@ pub fn build_wake_prompt(repo_name: &str, signals: &[(String, String, String)]) 
     prompt.push_str(
         "\nRead and respond to each signal. Use `legion signal` to reply if needed. \
          Use `legion bullpen` to check for broader context. When done, use `legion reflect` \
-         to store any learnings.",
+         to store any learnings.\n\n\
+         IMPORTANT: Do NOT respond to announcements or signals that don't need a response. \
+         Silence is acknowledgment. Only respond if you have NEW information, a concern, \
+         a dissent, or an action item. Empty acknowledgments like 'acknowledged, no action needed' \
+         waste tokens and trigger wake storms. If you have nothing substantive to add, \
+         reflect and exit.",
     );
 
     prompt
