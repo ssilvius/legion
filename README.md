@@ -1,16 +1,92 @@
 # Legion
 
-Agent memory for one engineer's craft.
+Agent memory and team coordination for Claude Code.
 
-Legion is a local Rust CLI that stores and retrieves agent reflections. It's the memory layer for Claude Code agents: every session ends with a reflection, every session starts with relevant context from past work. Agents consult each other when they're stuck. Agents post to the bullpen when they have something worth sharing. They delegate work through tasks. Each repo builds its own corpus of learned heuristics over time. The shape of the corpus IS the expertise.
+Legion is a local Rust CLI and Claude Code plugin that gives AI agents persistent memory, team communication, and work coordination. Every session ends with a reflection, every session starts with relevant context from past work. Agents consult each other when stuck. They post to the bullpen when they have something worth sharing. They delegate work through tasks. They wake each other up when signals arrive. Each repo builds its own corpus of learned heuristics over time.
 
-## Install
+## Quick Start
+
+### 1. Install the binary
 
 ```bash
 cargo install --path .
 ```
 
 Requires Rust stable toolchain. The binary installs to `~/.cargo/bin/legion`.
+
+### 2. Install the Claude Code plugin
+
+The plugin manages all hooks and the real-time channel. Clone and register it:
+
+```bash
+git clone https://github.com/ssilvius/claude-legion-plugins.git
+```
+
+Add to your `~/.claude/settings.json`:
+
+```json
+{
+  "extraKnownMarketplaces": {
+    "claude-legion-plugins": {
+      "source": {
+        "source": "directory",
+        "path": "/path/to/claude-legion-plugins"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "legion@claude-legion-plugins": true
+  }
+}
+```
+
+The plugin provides:
+- **SessionStart hook**: recalls reflections + surfaces cross-repo highlights + shows agent work status
+- **Stop hook**: prompts the agent to reflect before closing
+- **PreToolUse hook**: reminds agents to check legion memory before searching code
+- **Real-time channel**: MCP server for bullpen posts, signals, and task responses between agents
+- **Slash commands**: `/bullpen`, `/recall`, `/consult`, `/reflect`, `/surface`, `/boost`, `/snooze`, `/watch-sync`
+
+### 3. Configure working directories
+
+Each repo that legion manages needs a working directory registered in Claude Code. Use `/add-dir` in a Claude Code session:
+
+```
+/add-dir /path/to/your/project
+```
+
+This tells Claude Code (and legion) where each repo lives on disk. Working directories are stored in your local Claude Code settings and persist across sessions.
+
+Then run `/watch-sync` to sync those directories into legion's auto-wake config.
+
+### 4. Start the dashboard (optional)
+
+```bash
+legion serve --port 3131
+```
+
+Web dashboard at `http://localhost:3131` with live SSE updates, bullpen feed, task kanban, chat, and agent stats.
+
+### 5. Enable auto-wake (optional)
+
+If you ran `/watch-sync` in step 3, your repos are already configured. Otherwise, create `watch.toml` manually at `~/Library/Application Support/legion/watch.toml` (macOS):
+
+```toml
+poll_interval_secs = 30
+cooldown_secs = 300
+
+[[repos]]
+name = "myproject"
+workdir = "/path/to/myproject"
+```
+
+Then run the watcher:
+
+```bash
+legion watch
+```
+
+When a signal arrives for a configured repo (e.g., `@myproject review:requested`), legion spawns a headless Claude session in that repo's working directory to handle it. Opt-IN only -- repos not in the config are never auto-woken.
 
 ## Usage
 
@@ -29,10 +105,10 @@ legion reflect --repo kelex --text "..." --domain color-tokens --tags "semantic,
 # Chain reflections (learning threads)
 legion reflect --repo kelex --text "..." --follows <parent-id>
 
-# Recall by relevance (hybrid BM25 + cosine similarity)
+# Recall by relevance (BM25 full-text search)
 legion recall --repo kelex --context "Zod schema mapping"
 
-# Recall most recent (bypasses search, useful for hooks)
+# Recall most recent
 legion recall --repo kelex --latest --limit 3
 
 # Consult across all repos (cross-agent knowledge sharing)
@@ -45,9 +121,24 @@ legion boost --id <reflection-id>
 legion chain --id <reflection-id>
 ```
 
-### Bullpen (Team Communication)
+### Agent Work System
 
-The bullpen is where agents talk to each other. Informal, unstructured, serendipitous. Post insights, ask questions, share discoveries. The real information flows here.
+Three commands that replace "what should I do?" with action:
+
+```bash
+# What's my state? (tasks, team needs, what changed)
+legion status --repo kelex
+
+# What does the team need help with?
+legion needs --repo kelex
+
+# Announce completed work, auto-notify blocked agents
+legion done --repo kelex --text "shipped PR #134"
+```
+
+`legion status` runs automatically at session start via the plugin hook. Agents see their work before they speak.
+
+### Bullpen (Team Communication)
 
 ```bash
 # Post to the bullpen
@@ -57,7 +148,7 @@ legion post --repo rafters --text "OKLCH bet paid off"
 legion bullpen --repo kelex
 legion bp --repo kelex          # short alias
 
-# Check unread count (for hooks)
+# Check unread count
 legion bp --count --repo kelex
 
 # Filter by type
@@ -67,7 +158,7 @@ legion bp --repo kelex --musings     # natural language only
 
 ### Signals (Structured Coordination)
 
-Signals are compact bullpen posts for coordination. Format: `@recipient verb:status {details}`.
+Compact bullpen posts for coordination. Format: `@recipient verb:status {details}`.
 
 ```bash
 legion signal --repo kelex --to legion --verb review --status approved
@@ -76,8 +167,6 @@ legion signal --repo kelex --to platform --verb request --status help --details 
 ```
 
 ### Tasks (Agent Delegation)
-
-Delegate work between agents with state-tracked tasks. Pending tasks appear in bullpen output and unread counts, so agents watching the board see them without a separate command.
 
 ```bash
 # Create a task for another agent
@@ -98,26 +187,48 @@ legion task unblock --id <task-id>
 
 State machine: `pending -> accepted -> done | blocked`. Blocked tasks can be unblocked back to accepted.
 
-### Quality Gate (Synapse)
+### Schedules
 
-Optional LLM-powered quality gating via the Anthropic API. Validates reflections against quality criteria and auto-classifies metadata. Requires `ANTHROPIC_API_KEY`.
+Automated bullpen posts on a schedule. Used for night shift coordination.
 
 ```bash
-# Validate and classify before storing
-legion reflect --repo kelex --text "..." --synapse
+# Create a daily schedule (HH:MM in UTC)
+legion schedule create --name "night-shift" --cron "06:00" --repo shingle --command "@all Night shift starting."
 
-# Classify a post before sharing
-legion post --repo kelex --text "..." --synapse
+# Create an interval schedule with a time window
+legion schedule create --name "poke" --cron "*/10m" --repo legion --command "@all Are you working?" --active-start "23:00" --active-end "07:00"
 
-# Debug: run synapse directly
-legion synapse --action validate --text "candidate text" --repo kelex
-legion synapse --action classify --text "candidate text"
+# List schedules
+legion schedule list
+
+# Enable/disable/delete
+legion schedule enable --id <id>
+legion schedule disable --id <id>
+legion schedule delete --id <id>
 ```
+
+Schedules fire through the `legion serve` SSE poll loop.
+
+### Watch (Auto-Wake)
+
+```bash
+# Start the watcher (long-lived process)
+legion watch
+```
+
+Polls SQLite for unhandled signals directed at configured repos. When a signal arrives, spawns a headless `claude --print` session in the target repo's working directory. The agent reads the signal, does the work, reflects, exits.
+
+- Opt-IN via `watch.toml` -- only listed repos get auto-woken
+- PID lock prevents multiple watchers
+- Per-repo cooldown (default 5 min) prevents wake storms
+- Signal deduplication via `handled_at` column
+
+Use `/watch-sync` in the plugin to auto-populate `watch.toml` from your Claude Code working directories.
 
 ### Other
 
 ```bash
-# Surface cross-repo highlights (posts, high-value reflections, chains, pending tasks)
+# Surface cross-repo highlights
 legion surface --repo kelex
 
 # Statistics
@@ -125,88 +236,66 @@ legion stats --repo kelex
 
 # Rebuild search index from database
 legion reindex
+
+# Compute embeddings for reflections missing them
+legion backfill
+
+# Configure Claude Code hooks (legacy -- use the plugin instead)
+legion init
+
+# Web dashboard
+legion serve --port 3131
 ```
 
 ## How It Works
 
-**Reflect**: After each session, the agent answers: "What would you tell another agent who hits this same problem tomorrow?" This framing produces actionable knowledge, not vague journaling. The reflection is stored in SQLite, indexed in Tantivy for BM25 full-text search, and embedded with model2vec for cosine similarity.
+**Reflect**: After each session, the agent answers: "What would you tell another agent who hits this same problem tomorrow?" This framing produces actionable knowledge, not vague journaling. Stored in SQLite, indexed in Tantivy for BM25 full-text search.
 
-**Recall**: At session start, relevant reflections are retrieved via hybrid scoring (0.6 BM25 + 0.4 cosine) and injected into the agent's context. On feature branches, the branch name provides search context. Falls back to most recent reflections when no keyword match exists. Boost/decay weighting surfaces frequently-useful knowledge.
+**Recall**: At session start, relevant reflections are injected into the agent's context. On feature branches, the branch name provides search context. Falls back to most recent reflections when no keyword match exists. Boost/decay weighting surfaces frequently-useful knowledge.
 
-**Consult**: When an agent hits something outside its domain, it searches reflections from ALL repos. The output includes repo attribution so the agent knows which domain the knowledge came from. Pull-based: the agent asks when it's stuck.
+**Consult**: When an agent hits something outside its domain, it searches reflections from ALL repos. The output includes repo attribution. Pull-based: the agent asks when it's stuck.
 
-**Bullpen**: Where agents talk to each other. Post insights, questions, discoveries, half-formed ideas, warnings. The unread count on session start creates curiosity without forcing content. Signals provide structured coordination within the same space. Serendipity over relevance.
+**Status**: One command that tells an agent everything it needs to start working. Your tasks, team review requests, recent changes. Runs automatically at session start.
 
-**Tasks**: Structured delegation between agents. One agent creates a task, the target agent picks it up in their next session. Pending tasks appear in bullpen output and unread counts -- agents watching the board see them without running a separate command. Idle time checks the task queue first -- pending tasks get priority, hobbies and exploration fill the rest. Delegation is also learning: studying another agent's output teaches you their patterns.
+**Needs**: What the team needs help with. Review requests, unanswered questions, blockers you can clear. Run when idle instead of saying "standing by."
 
-**Surface**: Cross-repo awareness on session start. Recent bullpen posts, high-value reflections from other repos, active learning chains, and pending inbound tasks. The minimum context needed to feel connected to the team. Tasks also flow through bullpen so agents in loop cycles see them without a dedicated surface call.
+**Done**: Announce completed work. Auto-notifies any agent that mentioned being blocked on your repo.
 
-## Claude Code Hooks
+**Bullpen**: Where agents talk to each other. Post insights, questions, discoveries. Signals provide structured coordination within the same space.
 
-Legion integrates via three hooks in `~/.claude/settings.json`:
+**Tasks**: Structured delegation between agents. Pending tasks appear in status output.
 
-```json
-{
-  "hooks": {
-    "SessionStart": [
-      {
-        "matcher": "startup",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "~/.claude/hooks/legion-recall.sh",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
-    "PreToolUse": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "~/.claude/hooks/legion-consult.sh",
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "~/.claude/hooks/legion-reflect.sh",
-            "timeout": 10
-          }
-        ]
-      }
-    ]
-  }
-}
-```
+**Watch**: Auto-wake sleeping agents when signals arrive. A long-lived process that polls for unhandled signals and spawns headless Claude sessions to handle them.
 
-**SessionStart** (`legion-recall.sh`): Retrieves reflections for the current repo. Tries BM25 search with the git branch name first, falls back to `--latest` for broad recall. Surfaces cross-repo highlights. Cleans up stop-hook markers. Returns results as `additionalContext`.
+## Plugin Architecture
 
-**PreToolUse** (`legion-consult.sh`): Checks for unread bullpen posts on every tool call. Only injects context when there are posts to read. Silent otherwise.
+Legion hooks are managed by the Claude Code plugin at [claude-legion-plugins](https://github.com/ssilvius/claude-legion-plugins):
 
-**Stop** (`legion-reflect.sh`): Blocks the agent from stopping and prompts it to reflect. Uses a CWD-based temp file marker to fire once per session -- the first stop prompts reflection, subsequent stops pass through cleanly.
+- **SessionStart**: Recalls reflections, surfaces cross-repo highlights, shows agent work status and team signals.
+- **Stop**: Prompts reflection before session close. Checks whether the agent helped a teammate.
+- **PreToolUse**: Reminds agents to check legion memory before searching code.
+- **Channel**: MCP server providing `legion_post`, `legion_reply`, `legion_signal`, `legion_task_respond` tools for real-time agent communication.
+- **Commands**: `/bullpen`, `/recall`, `/consult`, `/reflect`, `/surface`, `/boost`, `/snooze`, `/watch-sync`
+- **Skills**: `legion-memory` (auto-triggered recall-before-grep doctrine)
 
 ## Architecture
 
-- **Storage**: SQLite via rusqlite with WAL mode. XDG data dir (`~/Library/Application Support/legion/` on macOS, `~/.local/share/legion/` on Linux). Override with `LEGION_DATA_DIR` env var.
-- **Search**: Tantivy BM25 with English stemming. Hybrid scoring with model2vec-rs embeddings (potion-base-8M, 256-dim). Queries filtered by repo, ranked by 0.6*BM25 + 0.4*cosine. Fail-open to BM25-only when model unavailable.
-- **IDs**: UUIDv7 (time-ordered, non-predictable).
-- **Quality gate**: Optional Anthropic API calls (Sonnet) for validation and classification. Fail-open on API errors.
+- **Storage**: SQLite via rusqlite with WAL mode. `~/Library/Application Support/legion/` on macOS.
+- **Search**: Tantivy BM25 with English stemming. Queries filtered by repo, ranked by boost/decay weighting.
+- **Embeddings**: model2vec-rs for semantic similarity (Phase 2.5). Stored as nullable BLOB column alongside BM25 index.
+- **Dashboard**: Axum web server with rust-embed for static assets. SSE for live updates. Interactive kanban, bullpen feed, chat, schedules.
+- **Watch**: Long-lived polling process that auto-wakes agents when signals arrive. Opt-in per repo via `watch.toml`.
+- **IDs**: UUIDv7 (time-ordered).
+- **Plugin**: Bun-based MCP server for real-time channel communication between agents.
 
 ## Development
 
 ```bash
-cargo test              # ~180 tests (unit + integration)
+cargo test              # 229 tests (unit + integration)
 cargo clippy -- -D warnings
 cargo fmt -- --check
 ```
 
 ## License
 
-Private.
+MIT
