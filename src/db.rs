@@ -623,23 +623,41 @@ impl Database {
     ///
     /// Returns team posts whose text starts with `@<repo_name> ` (case-sensitive)
     /// or `@all ` that have not yet been marked as handled (`handled_at IS NULL`).
-    pub fn get_unhandled_signals_for_repo(&self, repo_name: &str) -> Result<Vec<Reflection>> {
+    pub fn get_unhandled_signals_for_repo(
+        &self,
+        repo_name: &str,
+        since: Option<&str>,
+    ) -> Result<Vec<Reflection>> {
         let pattern_specific = format!("@{} %", repo_name);
         let pattern_all = "@all %";
-        let mut stmt = self.conn.prepare(
+        let since_clause = if since.is_some() {
+            " AND created_at > ?4"
+        } else {
+            ""
+        };
+        let query = format!(
             "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, \
              last_recalled_at, parent_id \
              FROM reflections \
              WHERE audience = 'team' \
                AND handled_at IS NULL \
                AND (text LIKE ?1 OR text LIKE ?2) \
-               AND repo != ?3 \
+               AND repo != ?3{} \
              ORDER BY created_at ASC",
-        )?;
-        let rows = stmt.query_map(
-            rusqlite::params![&pattern_specific, pattern_all, repo_name],
-            map_reflection_row,
-        )?;
+            since_clause
+        );
+        let mut stmt = self.conn.prepare(&query)?;
+        let rows = if let Some(since_ts) = since {
+            stmt.query_map(
+                rusqlite::params![&pattern_specific, pattern_all, repo_name, since_ts],
+                map_reflection_row,
+            )?
+        } else {
+            stmt.query_map(
+                rusqlite::params![&pattern_specific, pattern_all, repo_name],
+                map_reflection_row,
+            )?
+        };
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(LegionError::Database)
     }
