@@ -178,8 +178,9 @@ impl CooldownTracker {
 pub fn find_pending_signals(
     db: &Database,
     repo_name: &str,
+    since: Option<&str>,
 ) -> Result<Vec<(String, String, String)>> {
-    let reflections = db.get_unhandled_signals_for_repo(repo_name)?;
+    let reflections = db.get_unhandled_signals_for_repo(repo_name, since)?;
 
     let mut signals: Vec<(String, String, String)> = Vec::new();
     for r in reflections {
@@ -243,6 +244,7 @@ pub fn poll_cycle(
     db: &Database,
     config: &WatchConfig,
     cooldown: &mut CooldownTracker,
+    since: Option<&str>,
 ) -> Result<u32> {
     let mut spawned: u32 = 0;
 
@@ -251,7 +253,7 @@ pub fn poll_cycle(
             continue;
         }
 
-        let signals = find_pending_signals(db, &repo.name)?;
+        let signals = find_pending_signals(db, &repo.name, since)?;
         if signals.is_empty() {
             continue;
         }
@@ -316,6 +318,7 @@ pub fn run(data_dir: &Path) -> Result<()> {
     let db = Database::open(&db_path)?;
     let mut cooldown = CooldownTracker::new(config.cooldown_secs);
     let poll_interval = Duration::from_secs(config.poll_interval_secs);
+    let start_time = chrono::Utc::now().to_rfc3339();
 
     eprintln!(
         "[legion watch] watching repos: {}",
@@ -328,7 +331,7 @@ pub fn run(data_dir: &Path) -> Result<()> {
     );
 
     loop {
-        match poll_cycle(&db, &config, &mut cooldown) {
+        match poll_cycle(&db, &config, &mut cooldown, Some(&start_time)) {
             Ok(n) if n > 0 => {
                 eprintln!("[legion watch] cycle complete: {} agent(s) spawned", n);
             }
@@ -407,7 +410,7 @@ workdir = "/tmp"
         db.insert_reflection("rafters", "@all announce: shipped", "team")
             .expect("insert broadcast");
 
-        let signals = find_pending_signals(&db, "legion").expect("find signals");
+        let signals = find_pending_signals(&db, "legion", None).expect("find signals");
         assert_eq!(signals.len(), 2);
 
         // Verify the targeted signal is found
@@ -432,7 +435,7 @@ workdir = "/tmp"
         db.insert_reflection("legion", "@legion review:approved", "team")
             .expect("insert self-signal");
 
-        let signals = find_pending_signals(&db, "legion").expect("find signals");
+        let signals = find_pending_signals(&db, "legion", None).expect("find signals");
         assert!(signals.is_empty(), "self-signals should be excluded");
     }
 
@@ -443,7 +446,7 @@ workdir = "/tmp"
         db.insert_reflection("kelex", "@legion review:approved", "team")
             .expect("insert signal");
 
-        let signals = find_pending_signals(&db, "legion").expect("first poll");
+        let signals = find_pending_signals(&db, "legion", None).expect("first poll");
         assert_eq!(signals.len(), 1);
 
         // Mark as handled
@@ -451,7 +454,7 @@ workdir = "/tmp"
         db.mark_signal_handled(id).expect("mark handled");
 
         // Should not appear again
-        let signals = find_pending_signals(&db, "legion").expect("second poll");
+        let signals = find_pending_signals(&db, "legion", None).expect("second poll");
         assert!(signals.is_empty());
     }
 
@@ -499,7 +502,7 @@ workdir = "/tmp"
         let mut cooldown = CooldownTracker::new(300);
         cooldown.record_wake("legion");
 
-        let spawned = poll_cycle(&db, &config, &mut cooldown).expect("poll");
+        let spawned = poll_cycle(&db, &config, &mut cooldown, None).expect("poll");
         assert_eq!(spawned, 0, "cooling repo should be skipped");
     }
 
