@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "rafters": {
+      "command": "pnpx",
+      "args": ["rafters@latest", "mcp"]
+    }
+  }
+}
