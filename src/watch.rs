@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use chrono::Timelike;
 use serde::Deserialize;
 
 use crate::db::Database;
@@ -26,6 +27,14 @@ pub struct WatchConfig {
     #[serde(default = "default_cooldown_secs")]
     pub cooldown_secs: u64,
 
+    /// Work hours start (0-23, local time). No cooldown during work hours.
+    #[serde(default)]
+    pub work_hours_start: Option<u8>,
+
+    /// Work hours end (0-23, local time). No cooldown during work hours.
+    #[serde(default)]
+    pub work_hours_end: Option<u8>,
+
     #[serde(default)]
     pub repos: Vec<WatchRepoConfig>,
 }
@@ -43,6 +52,8 @@ impl Default for WatchConfig {
         Self {
             poll_interval_secs: default_poll_interval(),
             cooldown_secs: default_cooldown_secs(),
+            work_hours_start: None,
+            work_hours_end: None,
             repos: Vec::new(),
         }
     }
@@ -146,18 +157,41 @@ fn process_alive(pid: u32) -> bool {
 pub struct CooldownTracker {
     last_wake: HashMap<String, Instant>,
     cooldown: Duration,
+    work_hours_start: Option<u8>,
+    work_hours_end: Option<u8>,
 }
 
 impl CooldownTracker {
-    pub fn new(cooldown_secs: u64) -> Self {
+    pub fn new(cooldown_secs: u64, work_hours_start: Option<u8>, work_hours_end: Option<u8>) -> Self {
         Self {
             last_wake: HashMap::new(),
             cooldown: Duration::from_secs(cooldown_secs),
+            work_hours_start,
+            work_hours_end,
+        }
+    }
+
+    /// Check whether we are in work hours (no cooldown applies).
+    fn is_work_hours(&self) -> bool {
+        if let (Some(start), Some(end)) = (self.work_hours_start, self.work_hours_end) {
+            let hour = chrono::Local::now().hour() as u8;
+            if start <= end {
+                hour >= start && hour < end
+            } else {
+                // Overnight range (e.g., 22-06)
+                hour >= start || hour < end
+            }
+        } else {
+            false
         }
     }
 
     /// Check whether the repo is on cooldown. Returns true if we should skip.
+    /// During work hours, cooldown is disabled.
     pub fn is_cooling_down(&self, repo: &str) -> bool {
+        if self.is_work_hours() {
+            return false;
+        }
         self.last_wake
             .get(repo)
             .is_some_and(|t| t.elapsed() < self.cooldown)
@@ -320,7 +354,11 @@ pub fn run(data_dir: &Path) -> Result<()> {
     let _guard = PidLockGuard(lock_path);
 
     let db = Database::open(&db_path)?;
-    let mut cooldown = CooldownTracker::new(config.cooldown_secs);
+    let mut cooldown = CooldownTracker::new(
+        config.cooldown_secs,
+        config.work_hours_start,
+        config.work_hours_end,
+    );
     let poll_interval = Duration::from_secs(config.poll_interval_secs);
     let start_time = chrono::Utc::now().to_rfc3339();
 
@@ -390,7 +428,7 @@ workdir = "/tmp"
 
     #[test]
     fn cooldown_tracker_prevents_rapid_wake() {
-        let mut tracker = CooldownTracker::new(300);
+        let mut tracker = CooldownTracker::new(300, None, None);
         assert!(!tracker.is_cooling_down("rafters"));
 
         tracker.record_wake("rafters");
@@ -523,6 +561,8 @@ workdir = "/tmp"
         let config = WatchConfig {
             poll_interval_secs: 1,
             cooldown_secs: 300,
+            work_hours_start: None,
+            work_hours_end: None,
             repos: vec![WatchRepoConfig {
                 name: "legion".to_string(),
                 workdir: "/tmp".to_string(),
@@ -534,7 +574,7 @@ workdir = "/tmp"
             .expect("insert");
 
         // Pre-cool the repo
-        let mut cooldown = CooldownTracker::new(300);
+        let mut cooldown = CooldownTracker::new(300, None, None);
         cooldown.record_wake("legion");
 
         let spawned = poll_cycle(&db, &config, &mut cooldown, None).expect("poll");
