@@ -271,10 +271,7 @@ pub fn poll_cycle(
         // every configured repo. Cooldown + since-timestamp prevent duplicate wakes.
         for (id, text, _) in &signals {
             if !text.starts_with("@all ") && db.mark_signal_handled(id).is_err() {
-                eprintln!(
-                    "[legion watch] failed to mark signal {} as handled",
-                    id
-                );
+                eprintln!("[legion watch] failed to mark signal {} as handled", id);
             }
         }
 
