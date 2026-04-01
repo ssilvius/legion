@@ -266,12 +266,14 @@ pub fn poll_cycle(
 
         let prompt = build_wake_prompt(&repo.name, &signals);
 
-        // Mark all signals as handled BEFORE spawning to prevent re-processing
-        for (id, _, _) in &signals {
-            if let Err(e) = db.mark_signal_handled(id) {
+        // Mark targeted signals as handled BEFORE spawning to prevent re-processing.
+        // Broadcast signals (@all) are NOT marked handled -- they need to be seen by
+        // every configured repo. Cooldown + since-timestamp prevent duplicate wakes.
+        for (id, text, _) in &signals {
+            if !text.starts_with("@all ") && db.mark_signal_handled(id).is_err() {
                 eprintln!(
-                    "[legion watch] failed to mark signal {} as handled: {}",
-                    id, e
+                    "[legion watch] failed to mark signal {} as handled",
+                    id
                 );
             }
         }
@@ -504,6 +506,37 @@ workdir = "/tmp"
 
         let spawned = poll_cycle(&db, &config, &mut cooldown, None).expect("poll");
         assert_eq!(spawned, 0, "cooling repo should be skipped");
+    }
+
+    #[test]
+    fn broadcast_signals_visible_to_all_repos() {
+        let (db, _index, _dir) = test_storage();
+
+        // Post an @all signal from kelex
+        db.insert_reflection("kelex", "@all RFC:help -- discover proposal", "team")
+            .expect("insert broadcast");
+
+        // Both legion and rafters should see it
+        let legion_signals = find_pending_signals(&db, "legion", None).expect("legion");
+        let rafters_signals = find_pending_signals(&db, "rafters", None).expect("rafters");
+        assert_eq!(legion_signals.len(), 1);
+        assert_eq!(rafters_signals.len(), 1);
+
+        // Mark handled for legion (targeted signal path) -- but @all should NOT be marked
+        // Simulate poll_cycle behavior: @all signals are skipped in mark_handled
+        for (id, text, _) in &legion_signals {
+            if !text.starts_with("@all ") {
+                db.mark_signal_handled(id).expect("mark handled");
+            }
+        }
+
+        // rafters should STILL see the broadcast
+        let rafters_after = find_pending_signals(&db, "rafters", None).expect("rafters after");
+        assert_eq!(
+            rafters_after.len(),
+            1,
+            "broadcast should remain visible to other repos"
+        );
     }
 
     #[test]
