@@ -432,6 +432,37 @@ workdir = "/tmp"
     }
 
     #[test]
+    fn find_pending_signals_detects_multi_recipient() {
+        let (db, _index, _dir) = test_storage();
+
+        // Multi-recipient signal: @shingle @huttspawn -- message
+        db.insert_reflection(
+            "legion",
+            "@shingle @huttspawn -- build draft sites from current content",
+            "team",
+        )
+        .expect("insert multi-recipient");
+
+        // Both shingle and huttspawn should see it
+        let shingle = find_pending_signals(&db, "shingle", None).expect("shingle");
+        let huttspawn = find_pending_signals(&db, "huttspawn", None).expect("huttspawn");
+        assert_eq!(shingle.len(), 1, "shingle should see multi-recipient signal");
+        assert_eq!(
+            huttspawn.len(),
+            1,
+            "huttspawn should see multi-recipient signal"
+        );
+
+        // legion (sender) should NOT see it
+        let legion = find_pending_signals(&db, "legion", None).expect("legion");
+        assert!(legion.is_empty(), "sender should not see own signal");
+
+        // unrelated repo should NOT see it
+        let kelex = find_pending_signals(&db, "kelex", None).expect("kelex");
+        assert!(kelex.is_empty(), "unmentioned repo should not see signal");
+    }
+
+    #[test]
     fn find_pending_signals_excludes_self_signals() {
         let (db, _index, _dir) = test_storage();
 

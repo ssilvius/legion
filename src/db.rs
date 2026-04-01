@@ -621,17 +621,20 @@ impl Database {
 
     /// Find unhandled signals directed at a specific repo.
     ///
-    /// Returns team posts whose text starts with `@<repo_name> ` (case-sensitive)
-    /// or `@all ` that have not yet been marked as handled (`handled_at IS NULL`).
+    /// Returns team posts that mention `@<repo_name>` (at start or mid-text)
+    /// or `@all` that have not yet been marked as handled (`handled_at IS NULL`).
+    /// Handles multi-recipient signals like `@shingle @huttspawn -- message`.
     pub fn get_unhandled_signals_for_repo(
         &self,
         repo_name: &str,
         since: Option<&str>,
     ) -> Result<Vec<Reflection>> {
-        let pattern_specific = format!("@{} %", repo_name);
-        let pattern_all = "@all %";
+        let pattern_start = format!("@{} %", repo_name);
+        let pattern_mid = format!("%@{} %", repo_name);
+        let pattern_all_start = "@all %";
+        let pattern_all_mid = "%@all %";
         let since_clause = if since.is_some() {
-            " AND created_at > ?4"
+            " AND created_at > ?6"
         } else {
             ""
         };
@@ -641,20 +644,33 @@ impl Database {
              FROM reflections \
              WHERE audience = 'team' \
                AND handled_at IS NULL \
-               AND (text LIKE ?1 OR text LIKE ?2) \
-               AND repo != ?3{} \
+               AND (text LIKE ?1 OR text LIKE ?2 OR text LIKE ?3 OR text LIKE ?4) \
+               AND repo != ?5{} \
              ORDER BY created_at ASC",
             since_clause
         );
         let mut stmt = self.conn.prepare(&query)?;
         let rows = if let Some(since_ts) = since {
             stmt.query_map(
-                rusqlite::params![&pattern_specific, pattern_all, repo_name, since_ts],
+                rusqlite::params![
+                    &pattern_start,
+                    &pattern_mid,
+                    pattern_all_start,
+                    pattern_all_mid,
+                    repo_name,
+                    since_ts
+                ],
                 map_reflection_row,
             )?
         } else {
             stmt.query_map(
-                rusqlite::params![&pattern_specific, pattern_all, repo_name],
+                rusqlite::params![
+                    &pattern_start,
+                    &pattern_mid,
+                    pattern_all_start,
+                    pattern_all_mid,
+                    repo_name
+                ],
                 map_reflection_row,
             )?
         };
