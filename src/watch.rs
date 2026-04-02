@@ -27,6 +27,11 @@ pub struct WatchConfig {
     #[serde(default = "default_cooldown_secs")]
     pub cooldown_secs: u64,
 
+    /// Seconds to wait between spawning agents. Prevents startup storms
+    /// where simultaneous I/O on the same drive causes overheating.
+    #[serde(default = "default_stagger_secs")]
+    pub stagger_secs: u64,
+
     /// Work hours start (0-23, local time). No cooldown during work hours.
     #[serde(default)]
     pub work_hours_start: Option<u8>,
@@ -47,11 +52,16 @@ fn default_cooldown_secs() -> u64 {
     300
 }
 
+fn default_stagger_secs() -> u64 {
+    15
+}
+
 impl Default for WatchConfig {
     fn default() -> Self {
         Self {
             poll_interval_secs: default_poll_interval(),
             cooldown_secs: default_cooldown_secs(),
+            stagger_secs: default_stagger_secs(),
             work_hours_start: None,
             work_hours_end: None,
             repos: Vec::new(),
@@ -314,6 +324,15 @@ pub fn poll_cycle(
             }
         }
 
+        // Stagger spawns to prevent I/O storms on shared storage
+        if spawned > 0 && config.stagger_secs > 0 {
+            eprintln!(
+                "[legion watch] staggering {}s before next spawn",
+                config.stagger_secs
+            );
+            std::thread::sleep(Duration::from_secs(config.stagger_secs));
+        }
+
         match spawn_agent(&repo.workdir, &prompt) {
             Ok(()) => {
                 cooldown.record_wake(&repo.name);
@@ -341,10 +360,11 @@ pub fn run(data_dir: &Path) -> Result<()> {
     let config = load_config(&config_path)?;
 
     eprintln!(
-        "[legion watch] config loaded: {} repo(s), poll every {}s, cooldown {}s",
+        "[legion watch] config loaded: {} repo(s), poll every {}s, cooldown {}s, stagger {}s",
         config.repos.len(),
         config.poll_interval_secs,
-        config.cooldown_secs
+        config.cooldown_secs,
+        config.stagger_secs
     );
 
     acquire_pid_lock(&lock_path)?;
@@ -561,6 +581,7 @@ workdir = "/tmp"
         let config = WatchConfig {
             poll_interval_secs: 1,
             cooldown_secs: 300,
+            stagger_secs: 0,
             work_hours_start: None,
             work_hours_end: None,
             repos: vec![WatchRepoConfig {
