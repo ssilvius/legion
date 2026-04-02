@@ -27,6 +27,11 @@ pub struct WatchConfig {
     #[serde(default = "default_cooldown_secs")]
     pub cooldown_secs: u64,
 
+    /// Seconds to wait between spawning agents. Prevents startup storms
+    /// where simultaneous I/O on the same drive causes overheating.
+    #[serde(default = "default_stagger_secs")]
+    pub stagger_secs: u64,
+
     /// Work hours start (0-23, local time). No cooldown during work hours.
     #[serde(default)]
     pub work_hours_start: Option<u8>,
@@ -47,11 +52,16 @@ fn default_cooldown_secs() -> u64 {
     300
 }
 
+fn default_stagger_secs() -> u64 {
+    15
+}
+
 impl Default for WatchConfig {
     fn default() -> Self {
         Self {
             poll_interval_secs: default_poll_interval(),
             cooldown_secs: default_cooldown_secs(),
+            stagger_secs: default_stagger_secs(),
             work_hours_start: None,
             work_hours_end: None,
             repos: Vec::new(),
@@ -162,7 +172,11 @@ pub struct CooldownTracker {
 }
 
 impl CooldownTracker {
-    pub fn new(cooldown_secs: u64, work_hours_start: Option<u8>, work_hours_end: Option<u8>) -> Self {
+    pub fn new(
+        cooldown_secs: u64,
+        work_hours_start: Option<u8>,
+        work_hours_end: Option<u8>,
+    ) -> Self {
         Self {
             last_wake: HashMap::new(),
             cooldown: Duration::from_secs(cooldown_secs),
@@ -305,17 +319,23 @@ pub fn poll_cycle(
 
         let prompt = build_wake_prompt(&repo.name, &signals);
 
-        // Mark targeted signals as handled BEFORE spawning to prevent re-processing.
-        // Broadcast signals (@all) are NOT marked handled -- they need to be seen by
-        // every configured repo. Cooldown + since-timestamp prevent duplicate wakes.
-        for (id, text, _) in &signals {
-            if !text.starts_with("@all ") && db.mark_signal_handled(id).is_err() {
-                eprintln!("[legion watch] failed to mark signal {} as handled", id);
-            }
+        if spawned > 0 && config.stagger_secs > 0 {
+            std::thread::sleep(Duration::from_secs(config.stagger_secs));
         }
 
         match spawn_agent(&repo.workdir, &prompt) {
             Ok(()) => {
+                // Mark targeted signals as handled AFTER successful spawn.
+                // Broadcast signals (@all) are NOT marked -- they need to be seen by
+                // every configured repo. Cooldown + since-timestamp prevent duplicate wakes.
+                for (id, text, _) in &signals {
+                    if !text.starts_with("@all ") && db.mark_signal_handled(id).is_err() {
+                        eprintln!(
+                            "[legion watch] failed to mark signal {} as handled for {}",
+                            id, repo.name
+                        );
+                    }
+                }
                 cooldown.record_wake(&repo.name);
                 spawned += 1;
                 eprintln!("[legion watch] spawned agent for {}", repo.name);
@@ -341,10 +361,11 @@ pub fn run(data_dir: &Path) -> Result<()> {
     let config = load_config(&config_path)?;
 
     eprintln!(
-        "[legion watch] config loaded: {} repo(s), poll every {}s, cooldown {}s",
+        "[legion watch] config loaded: {} repo(s), poll every {}s, cooldown {}s, stagger {}s",
         config.repos.len(),
         config.poll_interval_secs,
-        config.cooldown_secs
+        config.cooldown_secs,
+        config.stagger_secs
     );
 
     acquire_pid_lock(&lock_path)?;
@@ -484,7 +505,11 @@ workdir = "/tmp"
         // Both shingle and huttspawn should see it
         let shingle = find_pending_signals(&db, "shingle", None).expect("shingle");
         let huttspawn = find_pending_signals(&db, "huttspawn", None).expect("huttspawn");
-        assert_eq!(shingle.len(), 1, "shingle should see multi-recipient signal");
+        assert_eq!(
+            shingle.len(),
+            1,
+            "shingle should see multi-recipient signal"
+        );
         assert_eq!(
             huttspawn.len(),
             1,
@@ -561,6 +586,7 @@ workdir = "/tmp"
         let config = WatchConfig {
             poll_interval_secs: 1,
             cooldown_secs: 300,
+            stagger_secs: 0,
             work_hours_start: None,
             work_hours_end: None,
             repos: vec![WatchRepoConfig {

@@ -144,6 +144,7 @@ Reads config from `<data-dir>/watch.toml`:
 ```toml
 poll_interval_secs = 30
 cooldown_secs = 300
+stagger_secs = 15       # seconds between spawns; 0 disables
 
 [[repos]]
 name = "rafters"
@@ -152,6 +153,7 @@ workdir = "/Volumes/store/projects/rafters-studio/rafters"
 
 Opt-IN per repo. Only repos listed in `watch.toml` get auto-woken. PID lock prevents multiple watchers.
 Cooldown prevents wake storms (default 5 minutes between wakes per repo).
+Stagger prevents I/O storms by sleeping between spawns (default 15s; set to 0 to disable).
 
 ## Phase Plan
 
