@@ -172,7 +172,11 @@ pub struct CooldownTracker {
 }
 
 impl CooldownTracker {
-    pub fn new(cooldown_secs: u64, work_hours_start: Option<u8>, work_hours_end: Option<u8>) -> Self {
+    pub fn new(
+        cooldown_secs: u64,
+        work_hours_start: Option<u8>,
+        work_hours_end: Option<u8>,
+    ) -> Self {
         Self {
             last_wake: HashMap::new(),
             cooldown: Duration::from_secs(cooldown_secs),
@@ -501,7 +505,11 @@ workdir = "/tmp"
         // Both shingle and huttspawn should see it
         let shingle = find_pending_signals(&db, "shingle", None).expect("shingle");
         let huttspawn = find_pending_signals(&db, "huttspawn", None).expect("huttspawn");
-        assert_eq!(shingle.len(), 1, "shingle should see multi-recipient signal");
+        assert_eq!(
+            shingle.len(),
+            1,
+            "shingle should see multi-recipient signal"
+        );
         assert_eq!(
             huttspawn.len(),
             1,
