@@ -315,21 +315,23 @@ pub fn poll_cycle(
 
         let prompt = build_wake_prompt(&repo.name, &signals);
 
-        // Mark targeted signals as handled BEFORE spawning to prevent re-processing.
-        // Broadcast signals (@all) are NOT marked handled -- they need to be seen by
-        // every configured repo. Cooldown + since-timestamp prevent duplicate wakes.
-        for (id, text, _) in &signals {
-            if !text.starts_with("@all ") && db.mark_signal_handled(id).is_err() {
-                eprintln!("[legion watch] failed to mark signal {} as handled", id);
-            }
-        }
-
         if spawned > 0 && config.stagger_secs > 0 {
             std::thread::sleep(Duration::from_secs(config.stagger_secs));
         }
 
         match spawn_agent(&repo.workdir, &prompt) {
             Ok(()) => {
+                // Mark targeted signals as handled AFTER successful spawn.
+                // Broadcast signals (@all) are NOT marked -- they need to be seen by
+                // every configured repo. Cooldown + since-timestamp prevent duplicate wakes.
+                for (id, text, _) in &signals {
+                    if !text.starts_with("@all ") && db.mark_signal_handled(id).is_err() {
+                        eprintln!(
+                            "[legion watch] failed to mark signal {} as handled for {}",
+                            id, repo.name
+                        );
+                    }
+                }
                 cooldown.record_wake(&repo.name);
                 spawned += 1;
                 eprintln!("[legion watch] spawned agent for {}", repo.name);
