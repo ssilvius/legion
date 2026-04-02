@@ -324,12 +324,7 @@ pub fn poll_cycle(
             }
         }
 
-        // Stagger spawns to prevent I/O storms on shared storage
         if spawned > 0 && config.stagger_secs > 0 {
-            eprintln!(
-                "[legion watch] staggering {}s before next spawn",
-                config.stagger_secs
-            );
             std::thread::sleep(Duration::from_secs(config.stagger_secs));
         }
 
