@@ -194,6 +194,7 @@ src/
   surface.rs       -- Cross-repo highlight surfacing
   task.rs          -- Task delegation between agents
   watch.rs         -- Auto-wake: poll for signals, spawn agent sessions
+  health.rs        -- System health sampling, pressure calculation, CLI display
   stats.rs         -- Reflection statistics reporting
   init.rs          -- Hook script generation and settings.json management
   error.rs         -- Error types
@@ -202,4 +203,13 @@ tests/
   integration.rs   -- End-to-end binary tests
 docs/
   plans/           -- Design documents
+plugin/
+  .claude-plugin/  -- Plugin manifest (plugin.json)
+  bin/legion       -- Wrapper script dispatching to cached binary
+  hooks/           -- SessionStart, Stop, PreCompact, PreToolUse hooks
+  commands/        -- Slash command skills (reflect, recall, boost, etc.)
+  agents/          -- Agent definitions (legion-prime, dungeon-master)
+  skills/          -- Skill definitions (legion-memory)
+  channel/         -- MCP server for real-time team channel (TypeScript/Bun)
+install.sh         -- Standalone installer (curl|bash) for non-plugin users
 ```
