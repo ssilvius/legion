@@ -125,7 +125,7 @@ mod tests {
 
     #[test]
     fn embedding_roundtrip_bytes() {
-        let original = vec![1.0f32, -2.5, 3.14159, 0.0, f32::MAX, f32::MIN];
+        let original = vec![1.0f32, -2.5, std::f32::consts::PI, 0.0, f32::MAX, f32::MIN];
         let bytes = embedding_to_bytes(&original);
         let restored = embedding_from_bytes(&bytes);
         assert_eq!(original, restored);

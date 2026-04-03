@@ -378,7 +378,7 @@ mod tests {
         )
         .unwrap();
         let results = idx.search_all("mapping", 10).unwrap();
-        assert!(results.len() >= 1);
+        assert!(!results.is_empty());
         assert_eq!(results[0].id, "id-strong");
         // BM25 scores must be in descending order
         for pair in results.windows(2) {
