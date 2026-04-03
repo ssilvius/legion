@@ -1071,15 +1071,15 @@ fn parse_duration_minutes(s: &str) -> error::Result<i64> {
     if let Some(hours) = s.strip_suffix('h') {
         let h: i64 = hours
             .parse()
-            .map_err(|_| error::LegionError::InvalidCron(format!("invalid duration: {s}")))?;
+            .map_err(|_| error::LegionError::Health(format!("invalid duration: {s}")))?;
         Ok(h * 60)
     } else if let Some(minutes) = s.strip_suffix('m') {
         let m: i64 = minutes
             .parse()
-            .map_err(|_| error::LegionError::InvalidCron(format!("invalid duration: {s}")))?;
+            .map_err(|_| error::LegionError::Health(format!("invalid duration: {s}")))?;
         Ok(m)
     } else {
-        Err(error::LegionError::InvalidCron(format!(
+        Err(error::LegionError::Health(format!(
             "invalid duration '{s}': use '1h' or '30m'"
         )))
     }

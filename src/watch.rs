@@ -360,7 +360,7 @@ impl AgentTracker {
                 Ok(None) => true, // still running
                 Err(e) => {
                     eprintln!("[legion watch] error checking agent for {}: {}", repo, e);
-                    false // remove on error
+                    true // keep tracking -- process may still be running
                 }
             }
         });
@@ -478,7 +478,7 @@ pub fn run(data_dir: &Path) -> Result<()> {
     let retention_cutoff = chrono::Duration::days(config.retention_days as i64);
     let start_time = chrono::Utc::now().to_rfc3339();
 
-    let mut poll_timer = Instant::now();
+    let mut poll_timer = Instant::now() - poll_interval; // poll immediately on start
     let mut health_timer = Instant::now() - health_interval; // sample immediately on start
 
     eprintln!(
