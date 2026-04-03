@@ -1,11 +1,25 @@
 #!/bin/bash
-# Legion plugin: download the correct platform binary on first run or version mismatch.
-# Uses CLAUDE_PLUGIN_DATA for persistent storage across plugin updates.
+# Legion plugin: ensure binary and channel dependencies are available.
+# Downloads the correct platform binary from GitHub Releases on first run
+# or version mismatch. Uses CLAUDE_PLUGIN_DATA for persistent storage.
 set -euo pipefail
 
 REPO="ssilvius/legion"
 BINARY_NAME="legion"
 EXPECTED_VERSION="0.1.1"
+
+# -- Channel dependencies ----------------------------------------------------
+
+# Install channel MCP dependencies if missing (bun required for the channel)
+CHANNEL_DIR="${CLAUDE_PLUGIN_ROOT:-}/channel"
+if [ -d "$CHANNEL_DIR" ] && [ -f "$CHANNEL_DIR/package.json" ] && [ ! -d "$CHANNEL_DIR/node_modules" ]; then
+  if command -v bun >/dev/null 2>&1; then
+    echo "[legion] installing channel dependencies..." >&2
+    (cd "$CHANNEL_DIR" && bun install) >&2 || true
+  fi
+fi
+
+# -- Binary setup -------------------------------------------------------------
 
 # CLAUDE_PLUGIN_DATA persists across plugin updates; fall back to plugin root
 DATA_DIR="${CLAUDE_PLUGIN_DATA:-${CLAUDE_PLUGIN_ROOT:-.}}"
@@ -15,6 +29,15 @@ BINARY_PATH="${DATA_DIR}/${BINARY_NAME}"
 if [ -x "$BINARY_PATH" ]; then
   INSTALLED=$("$BINARY_PATH" --version 2>/dev/null | awk '{print $2}' || echo "")
   if [ "$INSTALLED" = "$EXPECTED_VERSION" ]; then
+    exit 0
+  fi
+fi
+
+# Also check system PATH for an existing installation
+SYSTEM_LEGION=$(command -v legion 2>/dev/null || true)
+if [ -n "$SYSTEM_LEGION" ] && [ -x "$SYSTEM_LEGION" ]; then
+  SYSTEM_VER=$("$SYSTEM_LEGION" --version 2>/dev/null | awk '{print $2}' || echo "")
+  if [ "$SYSTEM_VER" = "$EXPECTED_VERSION" ]; then
     exit 0
   fi
 fi
