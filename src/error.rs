@@ -59,6 +59,9 @@ pub enum LegionError {
 
     #[error("TOML parse error: {0}")]
     Toml(#[from] toml::de::Error),
+
+    #[error("health error: {0}")]
+    Health(String),
 }
 
 pub type Result<T> = std::result::Result<T, LegionError>;

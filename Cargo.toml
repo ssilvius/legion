@@ -24,6 +24,7 @@ mime_guess = "2"
 tokio-stream = "0.1"
 async-stream = "0.3"
 toml = "0.8"
+sysinfo = { version = "0.34", default-features = false, features = ["system", "component"] }
 
 [dev-dependencies]
 tempfile = "3"

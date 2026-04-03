@@ -2,6 +2,7 @@ mod board;
 mod db;
 mod embed;
 mod error;
+mod health;
 mod init;
 mod recall;
 mod reflect;
@@ -263,6 +264,21 @@ enum Commands {
 
     /// Watch for signals and auto-wake sleeping agents
     Watch,
+
+    /// Show current system health and recent trend
+    Health {
+        /// Show history for the last N duration (e.g., "1h", "30m", "24h")
+        #[arg(long)]
+        history: Option<String>,
+
+        /// Show health for all hosts (after smuggler replication)
+        #[arg(long)]
+        all_hosts: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -970,7 +986,258 @@ fn main() -> error::Result<()> {
             let base = data_dir()?;
             watch::run(&base)?;
         }
+        Commands::Health {
+            history,
+            all_hosts,
+            json,
+        } => {
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+
+            if let Some(duration_str) = history {
+                // History mode: read from DB only
+                let minutes: i64 = parse_duration_minutes(&duration_str)?;
+                let since = (chrono::Utc::now() - chrono::Duration::minutes(minutes)).to_rfc3339();
+                let hostname = sysinfo::System::host_name().unwrap_or_else(|| {
+                    eprintln!("[legion] warning: could not determine hostname, using 'unknown'");
+                    "unknown".to_string()
+                });
+
+                let samples = if all_hosts {
+                    database.get_health_all_hosts(&since)?
+                } else {
+                    database.get_health_history(&hostname, &since)?
+                };
+
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&samples).map_err(error::LegionError::Json)?
+                    );
+                } else if samples.is_empty() {
+                    eprintln!("[legion] no health samples found (is watch running?)");
+                } else {
+                    print_health_history(&samples);
+                }
+            } else if all_hosts {
+                // All-hosts summary from DB
+                let since = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
+                let samples = database.get_health_all_hosts(&since)?;
+
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&samples).map_err(error::LegionError::Json)?
+                    );
+                } else if samples.is_empty() {
+                    eprintln!("[legion] no health samples found (is watch running?)");
+                } else {
+                    print_health_all_hosts(&samples);
+                }
+            } else {
+                // Default: live sample + trend from DB
+                let mut sampler = health::HealthSampler::new(6);
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                sampler.sample();
+                let sample = sampler.to_health_sample(0)?;
+
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&sample).map_err(error::LegionError::Json)?
+                    );
+                } else {
+                    print_health_live(&sample);
+
+                    // Try to show trend from DB
+                    let since = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
+                    let history = database.get_health_history(sampler.hostname(), &since)?;
+                    if !history.is_empty() {
+                        print_health_trend(&history);
+                    } else {
+                        eprintln!("\n  (no trend data -- start `legion watch` for history)");
+                    }
+                }
+            }
+        }
     }
 
     Ok(())
+}
+
+/// Parse a duration string like "1h", "30m", "24h" into minutes.
+fn parse_duration_minutes(s: &str) -> error::Result<i64> {
+    let s = s.trim();
+    if let Some(hours) = s.strip_suffix('h') {
+        let h: i64 = hours
+            .parse()
+            .map_err(|_| error::LegionError::Health(format!("invalid duration: {s}")))?;
+        Ok(h * 60)
+    } else if let Some(minutes) = s.strip_suffix('m') {
+        let m: i64 = minutes
+            .parse()
+            .map_err(|_| error::LegionError::Health(format!("invalid duration: {s}")))?;
+        Ok(m)
+    } else {
+        Err(error::LegionError::Health(format!(
+            "invalid duration '{s}': use '1h' or '30m'"
+        )))
+    }
+}
+
+fn print_health_live(sample: &health::HealthSample) {
+    println!(
+        "[legion] health @ {} ({})\n",
+        sample.hostname, sample.sampled_at
+    );
+    println!(
+        "  CPU:     {:5.1}%  {}  ({} cores)",
+        sample.cpu_usage_pct,
+        health::render_gauge(sample.cpu_usage_pct, 20),
+        sample.cpu_core_count
+    );
+    println!(
+        "  Memory:  {:5.1}%  {}  ({} / {})",
+        sample.mem_usage_pct,
+        health::render_gauge(sample.mem_usage_pct, 20),
+        health::format_bytes(sample.mem_used_bytes),
+        health::format_bytes(sample.mem_total_bytes)
+    );
+
+    let swap_pct: f64 = sample.swap_pct();
+    let swap_total_str: String = sample
+        .swap_total_bytes
+        .map_or_else(|| "N/A".to_string(), health::format_bytes);
+    let swap_used_str: String = sample
+        .swap_used_bytes
+        .map_or_else(|| "0".to_string(), health::format_bytes);
+    println!(
+        "  Swap:    {:5.1}%  {}  ({} / {})",
+        swap_pct,
+        health::render_gauge(swap_pct, 20),
+        swap_used_str,
+        swap_total_str
+    );
+
+    if let Some(temp) = sample.cpu_temp_celsius {
+        println!(
+            "  Temp:    {:5.1}C  {}",
+            temp,
+            health::render_gauge(temp, 20)
+        );
+    }
+
+    if let (Some(l1), Some(l5), Some(l15)) =
+        (sample.load_avg_1, sample.load_avg_5, sample.load_avg_15)
+    {
+        println!("  Load:    {:.2} / {:.2} / {:.2}", l1, l5, l15);
+    }
+
+    let status: &str = if sample.pressure < 60.0 {
+        "OK"
+    } else if sample.pressure < 80.0 {
+        "ELEVATED"
+    } else {
+        "HIGH"
+    };
+    println!(
+        "\n  Pressure: {:.1}%  -- {} (threshold: 80%)",
+        sample.pressure, status
+    );
+    println!("  Agents:   {} active", sample.agents_active);
+}
+
+fn print_health_trend(samples: &[health::HealthSample]) {
+    if samples.is_empty() {
+        return;
+    }
+    println!("\n  Trend ({} samples):", samples.len());
+
+    let pressures: Vec<String> = samples
+        .iter()
+        .rev()
+        .map(|s| format!("{:.0}", s.pressure))
+        .collect();
+    let avg_p: f64 = samples.iter().map(|s| s.pressure).sum::<f64>() / samples.len() as f64;
+    println!("    pressure  {}  avg: {:.1}", pressures.join(" "), avg_p);
+
+    let cpus: Vec<String> = samples
+        .iter()
+        .rev()
+        .map(|s| format!("{:.0}", s.cpu_usage_pct))
+        .collect();
+    let avg_c: f64 = samples.iter().map(|s| s.cpu_usage_pct).sum::<f64>() / samples.len() as f64;
+    println!("    cpu       {}  avg: {:.1}", cpus.join(" "), avg_c);
+
+    let mems: Vec<String> = samples
+        .iter()
+        .rev()
+        .map(|s| format!("{:.0}", s.mem_usage_pct))
+        .collect();
+    let avg_m: f64 = samples.iter().map(|s| s.mem_usage_pct).sum::<f64>() / samples.len() as f64;
+    println!("    memory    {}  avg: {:.1}", mems.join(" "), avg_m);
+}
+
+fn print_health_history(samples: &[health::HealthSample]) {
+    println!("[legion] health history ({} samples)\n", samples.len());
+    println!(
+        "  {:<20} {:>6} {:>6} {:>6} {:>7} {:>9} {:>7}",
+        "Time", "CPU", "Mem", "Swap", "Temp", "Pressure", "Agents"
+    );
+    for s in samples {
+        let time: &str = s
+            .sampled_at
+            .split_once('T')
+            .map_or(s.sampled_at.as_str(), |(_, t)| {
+                t.split_once('.').map_or(t, |(hms, _)| hms)
+            });
+        let swap_pct: f64 = s.swap_pct();
+        let temp_str: String = s
+            .cpu_temp_celsius
+            .map_or_else(|| "--".to_string(), |t| format!("{:.1}C", t));
+        println!(
+            "  {:<20} {:5.1}% {:5.1}% {:5.1}% {:>7} {:8.1}% {:>7}",
+            time, s.cpu_usage_pct, s.mem_usage_pct, swap_pct, temp_str, s.pressure, s.agents_active
+        );
+    }
+}
+
+fn print_health_all_hosts(samples: &[health::HealthSample]) {
+    use std::collections::HashMap;
+
+    println!("[legion] health (all hosts)\n");
+
+    // Group by hostname, keep latest per host
+    let mut latest: HashMap<&str, &health::HealthSample> = HashMap::new();
+    for s in samples {
+        latest
+            .entry(s.hostname.as_str())
+            .and_modify(|existing| {
+                if s.sampled_at > existing.sampled_at {
+                    *existing = s;
+                }
+            })
+            .or_insert(s);
+    }
+
+    let mut hosts: Vec<&&health::HealthSample> = latest.values().collect();
+    hosts.sort_by(|a, b| a.hostname.cmp(&b.hostname));
+
+    for s in hosts {
+        let age: String = match chrono::DateTime::parse_from_rfc3339(&s.sampled_at) {
+            Ok(dt) => {
+                let secs: i64 = (chrono::Utc::now() - dt.with_timezone(&chrono::Utc)).num_seconds();
+                if secs < 60 {
+                    format!("{}s ago", secs)
+                } else {
+                    format!("{}m ago", secs / 60)
+                }
+            }
+            Err(_) => "?".to_string(),
+        };
+        println!(
+            "  {:<20} CPU: {:5.1}%  Mem: {:5.1}%  Pressure: {:5.1}%  Agents: {}  ({})",
+            s.hostname, s.cpu_usage_pct, s.mem_usage_pct, s.pressure, s.agents_active, age
+        );
+    }
 }

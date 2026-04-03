@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Child;
 use std::time::{Duration, Instant};
 
 use chrono::Timelike;
@@ -7,6 +8,7 @@ use serde::Deserialize;
 
 use crate::db::Database;
 use crate::error::{LegionError, Result};
+use crate::health::HealthSampler;
 use crate::signal;
 
 // -- Config ------------------------------------------------------------------
@@ -40,6 +42,22 @@ pub struct WatchConfig {
     #[serde(default)]
     pub work_hours_end: Option<u8>,
 
+    /// Pressure threshold (0-100). Spawning is skipped when exceeded.
+    #[serde(default = "default_health_threshold")]
+    pub health_threshold_pct: f64,
+
+    /// Seconds between health samples.
+    #[serde(default = "default_health_poll_secs")]
+    pub health_poll_secs: u64,
+
+    /// Number of samples in the rolling pressure window.
+    #[serde(default = "default_health_window_size")]
+    pub health_window_size: usize,
+
+    /// Days to retain health samples before pruning.
+    #[serde(default = "default_retention_days")]
+    pub retention_days: u64,
+
     #[serde(default)]
     pub repos: Vec<WatchRepoConfig>,
 }
@@ -56,6 +74,22 @@ fn default_stagger_secs() -> u64 {
     15
 }
 
+fn default_health_threshold() -> f64 {
+    80.0
+}
+
+fn default_health_poll_secs() -> u64 {
+    5
+}
+
+fn default_health_window_size() -> usize {
+    6
+}
+
+fn default_retention_days() -> u64 {
+    7
+}
+
 impl Default for WatchConfig {
     fn default() -> Self {
         Self {
@@ -64,6 +98,10 @@ impl Default for WatchConfig {
             stagger_secs: default_stagger_secs(),
             work_hours_start: None,
             work_hours_end: None,
+            health_threshold_pct: default_health_threshold(),
+            health_poll_secs: default_health_poll_secs(),
+            health_window_size: default_health_window_size(),
+            retention_days: default_retention_days(),
             repos: Vec::new(),
         }
     }
@@ -269,8 +307,8 @@ pub fn build_wake_prompt(repo_name: &str, signals: &[(String, String, String)]) 
 
 /// Spawn a `claude --print` session for the given repo.
 ///
-/// Returns Ok(()) after spawning (does not wait for completion).
-pub fn spawn_agent(workdir: &str, prompt: &str) -> Result<()> {
+/// Returns the child process handle on success.
+pub fn spawn_agent(workdir: &str, prompt: &str) -> Result<Child> {
     let child = std::process::Command::new("claude")
         .args(["--print", "-p", prompt])
         .current_dir(workdir)
@@ -280,11 +318,57 @@ pub fn spawn_agent(workdir: &str, prompt: &str) -> Result<()> {
         .spawn();
 
     match child {
-        Ok(_) => Ok(()),
+        Ok(c) => Ok(c),
         Err(e) => {
             eprintln!("[legion watch] failed to spawn agent: {}", e);
             Err(LegionError::Io(e))
         }
+    }
+}
+
+// -- Agent Tracker -----------------------------------------------------------
+
+/// Tracks spawned child processes for active agent counting.
+pub struct AgentTracker {
+    children: Vec<(String, Child)>,
+}
+
+impl AgentTracker {
+    pub fn new() -> Self {
+        Self {
+            children: Vec::new(),
+        }
+    }
+
+    /// Record a spawned child process.
+    pub fn track(&mut self, repo: String, child: Child) {
+        self.children.push((repo, child));
+    }
+
+    /// Reap finished child processes, removing them from tracking.
+    pub fn reap_finished(&mut self) {
+        self.children.retain_mut(|(repo, child)| {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    eprintln!(
+                        "[legion watch] agent for {} exited ({})",
+                        repo,
+                        if status.success() { "ok" } else { "error" }
+                    );
+                    false // remove from list
+                }
+                Ok(None) => true, // still running
+                Err(e) => {
+                    eprintln!("[legion watch] error checking agent for {}: {}", repo, e);
+                    true // keep tracking -- process may still be running
+                }
+            }
+        });
+    }
+
+    /// Number of currently active agents.
+    pub fn active_count(&self) -> i32 {
+        self.children.len() as i32
     }
 }
 
@@ -297,6 +381,7 @@ pub fn poll_cycle(
     db: &Database,
     config: &WatchConfig,
     cooldown: &mut CooldownTracker,
+    tracker: &mut AgentTracker,
     since: Option<&str>,
 ) -> Result<u32> {
     let mut spawned: u32 = 0;
@@ -324,18 +409,19 @@ pub fn poll_cycle(
         }
 
         match spawn_agent(&repo.workdir, &prompt) {
-            Ok(()) => {
-                // Mark targeted signals as handled AFTER successful spawn.
-                // Broadcast signals (@all) are NOT marked -- they need to be seen by
-                // every configured repo. Cooldown + since-timestamp prevent duplicate wakes.
-                for (id, text, _) in &signals {
-                    if !text.starts_with("@all ") && db.mark_signal_handled(id).is_err() {
+            Ok(child) => {
+                // Mark ALL signals as handled for THIS repo (per-repo tracking).
+                // This includes @all broadcasts -- each repo marks its own copy,
+                // so other repos still see the signal on their next poll.
+                for (id, _, _) in &signals {
+                    if db.mark_signal_handled_for_repo(id, &repo.name).is_err() {
                         eprintln!(
                             "[legion watch] failed to mark signal {} as handled for {}",
                             id, repo.name
                         );
                     }
                 }
+                tracker.track(repo.name.clone(), child);
                 cooldown.record_wake(&repo.name);
                 spawned += 1;
                 eprintln!("[legion watch] spawned agent for {}", repo.name);
@@ -351,8 +437,10 @@ pub fn poll_cycle(
 
 /// Run the watch daemon main loop.
 ///
-/// This function blocks indefinitely, polling SQLite at the configured
-/// interval. It handles SIGINT/SIGTERM for graceful shutdown.
+/// Uses a dual-interval loop: health sampling every `health_poll_secs`
+/// (default 5s) and spawn checks every `poll_interval_secs` (default 30s).
+/// Spawning is gated on system health -- if pressure exceeds the threshold,
+/// the spawn cycle is skipped.
 pub fn run(data_dir: &Path) -> Result<()> {
     let config_path: PathBuf = data_dir.join("watch.toml");
     let lock_path: PathBuf = data_dir.join("watch.pid");
@@ -361,11 +449,13 @@ pub fn run(data_dir: &Path) -> Result<()> {
     let config = load_config(&config_path)?;
 
     eprintln!(
-        "[legion watch] config loaded: {} repo(s), poll every {}s, cooldown {}s, stagger {}s",
+        "[legion watch] config loaded: {} repo(s), poll every {}s, cooldown {}s, stagger {}s, \
+         health threshold {}%",
         config.repos.len(),
         config.poll_interval_secs,
         config.cooldown_secs,
-        config.stagger_secs
+        config.stagger_secs,
+        config.health_threshold_pct
     );
 
     acquire_pid_lock(&lock_path)?;
@@ -380,8 +470,16 @@ pub fn run(data_dir: &Path) -> Result<()> {
         config.work_hours_start,
         config.work_hours_end,
     );
+    let mut tracker = AgentTracker::new();
+    let mut sampler = HealthSampler::new(config.health_window_size);
+
     let poll_interval = Duration::from_secs(config.poll_interval_secs);
+    let health_interval = Duration::from_secs(config.health_poll_secs);
+    let retention_cutoff = chrono::Duration::days(config.retention_days as i64);
     let start_time = chrono::Utc::now().to_rfc3339();
+
+    let mut poll_timer = Instant::now() - poll_interval; // poll immediately on start
+    let mut health_timer = Instant::now() - health_interval; // sample immediately on start
 
     eprintln!(
         "[legion watch] watching repos: {}",
@@ -394,17 +492,59 @@ pub fn run(data_dir: &Path) -> Result<()> {
     );
 
     loop {
-        match poll_cycle(&db, &config, &mut cooldown, Some(&start_time)) {
-            Ok(n) if n > 0 => {
-                eprintln!("[legion watch] cycle complete: {} agent(s) spawned", n);
+        // Health sample on its own interval
+        if health_timer.elapsed() >= health_interval {
+            sampler.sample();
+            tracker.reap_finished();
+
+            // Persist health sample (failure is non-fatal)
+            match sampler.to_health_sample(tracker.active_count()) {
+                Ok(sample) => {
+                    if let Err(e) = db.insert_health_sample(&sample) {
+                        eprintln!("[legion watch] health persist error: {}", e);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[legion watch] health sample error: {}", e);
+                }
             }
-            Ok(_) => {} // quiet cycle, no spam
-            Err(e) => {
-                eprintln!("[legion watch] poll error: {}", e);
-            }
+
+            health_timer = Instant::now();
         }
 
-        std::thread::sleep(poll_interval);
+        // Spawn check on the poll interval
+        if poll_timer.elapsed() >= poll_interval {
+            if sampler.can_spawn(config.health_threshold_pct) {
+                match poll_cycle(&db, &config, &mut cooldown, &mut tracker, Some(&start_time)) {
+                    Ok(n) if n > 0 => {
+                        eprintln!("[legion watch] cycle complete: {} agent(s) spawned", n);
+                    }
+                    Ok(_) => {} // quiet cycle, no spam
+                    Err(e) => {
+                        eprintln!("[legion watch] poll error: {}", e);
+                    }
+                }
+            } else {
+                let pressure: f64 = sampler.pressure();
+                eprintln!(
+                    "[legion watch] pressure {:.1}% >= threshold {:.0}% -- skipping spawn cycle",
+                    pressure, config.health_threshold_pct
+                );
+            }
+
+            // Prune old health samples and stale watch_handled records (non-fatal)
+            let cutoff = (chrono::Utc::now() - retention_cutoff).to_rfc3339();
+            if let Err(e) = db.prune_health_samples(&cutoff) {
+                eprintln!("[legion watch] health prune error: {}", e);
+            }
+            if let Err(e) = db.prune_watch_handled(&cutoff) {
+                eprintln!("[legion watch] watch_handled prune error: {}", e);
+            }
+
+            poll_timer = Instant::now();
+        }
+
+        std::thread::sleep(Duration::from_secs(1));
     }
 }
 
@@ -547,11 +687,12 @@ workdir = "/tmp"
         let signals = find_pending_signals(&db, "legion", None).expect("first poll");
         assert_eq!(signals.len(), 1);
 
-        // Mark as handled
+        // Mark as handled for legion
         let (id, _, _) = &signals[0];
-        db.mark_signal_handled(id).expect("mark handled");
+        db.mark_signal_handled_for_repo(id, "legion")
+            .expect("mark handled");
 
-        // Should not appear again
+        // Should not appear again for legion
         let signals = find_pending_signals(&db, "legion", None).expect("second poll");
         assert!(signals.is_empty());
     }
@@ -584,15 +725,11 @@ workdir = "/tmp"
         let (db, _index, _dir) = test_storage();
 
         let config = WatchConfig {
-            poll_interval_secs: 1,
-            cooldown_secs: 300,
-            stagger_secs: 0,
-            work_hours_start: None,
-            work_hours_end: None,
             repos: vec![WatchRepoConfig {
                 name: "legion".to_string(),
                 workdir: "/tmp".to_string(),
             }],
+            ..WatchConfig::default()
         };
 
         // Insert a signal
@@ -603,7 +740,8 @@ workdir = "/tmp"
         let mut cooldown = CooldownTracker::new(300, None, None);
         cooldown.record_wake("legion");
 
-        let spawned = poll_cycle(&db, &config, &mut cooldown, None).expect("poll");
+        let mut tracker = AgentTracker::new();
+        let spawned = poll_cycle(&db, &config, &mut cooldown, &mut tracker, None).expect("poll");
         assert_eq!(spawned, 0, "cooling repo should be skipped");
     }
 
@@ -621,13 +759,18 @@ workdir = "/tmp"
         assert_eq!(legion_signals.len(), 1);
         assert_eq!(rafters_signals.len(), 1);
 
-        // Mark handled for legion (targeted signal path) -- but @all should NOT be marked
-        // Simulate poll_cycle behavior: @all signals are skipped in mark_handled
-        for (id, text, _) in &legion_signals {
-            if !text.starts_with("@all ") {
-                db.mark_signal_handled(id).expect("mark handled");
-            }
+        // Mark handled for legion using per-repo tracking
+        for (id, _, _) in &legion_signals {
+            db.mark_signal_handled_for_repo(id, "legion")
+                .expect("mark handled for legion");
         }
+
+        // legion should NOT see it anymore
+        let legion_after = find_pending_signals(&db, "legion", None).expect("legion after");
+        assert!(
+            legion_after.is_empty(),
+            "legion should not see broadcast after handling"
+        );
 
         // rafters should STILL see the broadcast
         let rafters_after = find_pending_signals(&db, "rafters", None).expect("rafters after");
@@ -635,6 +778,19 @@ workdir = "/tmp"
             rafters_after.len(),
             1,
             "broadcast should remain visible to other repos"
+        );
+
+        // Mark handled for rafters too
+        for (id, _, _) in &rafters_signals {
+            db.mark_signal_handled_for_repo(id, "rafters")
+                .expect("mark handled for rafters");
+        }
+
+        // Now rafters should not see it either
+        let rafters_final = find_pending_signals(&db, "rafters", None).expect("rafters final");
+        assert!(
+            rafters_final.is_empty(),
+            "rafters should not see broadcast after handling"
         );
     }
 
