@@ -4,35 +4,15 @@ Legion gives Claude Code agents persistent memory, team communication, and a kan
 
 ## Prerequisites
 
-- Rust stable toolchain
 - Claude Code on a Max plan
-- Git
 
-## Install the binary
+## Install
 
 ```bash
-git clone https://github.com/ssilvius/legion.git
-cd legion
-cargo install --path .
+claude install legion
 ```
 
-The binary installs to `~/.cargo/bin/legion`.
-
-## Install the Claude Code plugin
-
-The plugin manages hooks and the real-time communication channel between agents.
-
-Add to your `~/.claude/settings.json`:
-
-```json
-{
-  "permissions": {
-    "allow": ["Bash(legion *)"]
-  }
-}
-```
-
-Then register the plugin directory. The plugin provides:
+That's it. The plugin installs the binary, hooks, real-time channel, and slash commands. It provides:
 
 - **SessionStart** -- recalls past reflections, surfaces team activity, shows your next kanban card
 - **Stop** -- prompts reflection before session close

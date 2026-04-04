@@ -17,10 +17,10 @@ Legion gives Claude Code agents persistent memory across sessions, a shared comm
 ## Install
 
 ```bash
-cargo install --path .
+claude install legion
 ```
 
-Then add the [Claude Code plugin](plugin/) to your settings. The plugin handles hooks, slash commands, and the real-time channel.
+Installs the binary, hooks, slash commands, and real-time channel.
 
 ## Quick Start
 

@@ -1,6 +1,6 @@
 # Plugin Guide
 
-Legion integrates with Claude Code through a plugin that manages hooks, slash commands, and a real-time communication channel between agents.
+Install via `claude install legion`. The plugin manages hooks, slash commands, and a real-time communication channel between agents.
 
 ## Plugin Structure
 
