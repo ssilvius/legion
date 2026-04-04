@@ -27,7 +27,7 @@ fi
 touch "$MARKER"
 
 # Check for unread bullpen posts
-BOARD_COUNT=$(legion bullpen --count --repo "$REPO" 2>/dev/null)
+BOARD_COUNT=$(legion -q bullpen --count --repo "$REPO" 2>/dev/null)
 BOARD_MSG=""
 if [ -n "$BOARD_COUNT" ]; then
   BOARD_MSG="

@@ -33,6 +33,6 @@ if [ -z "$CONTEXT" ]; then
 fi
 
 # Save checkpoint reflection
-legion reflect --repo "$REPO" --text "[COMPACT CHECKPOINT] Work in progress before compaction: ${CONTEXT}" --domain "checkpoint" --tags "auto,precompact" 2>/dev/null
+legion -q reflect --repo "$REPO" --text "[COMPACT CHECKPOINT] Work in progress before compaction: ${CONTEXT}" --domain "checkpoint" --tags "auto,precompact" 2>/dev/null
 
 exit 0

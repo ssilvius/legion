@@ -34,12 +34,12 @@ append() {
 
 OUTPUT=""
 if [ -n "$BRANCH" ] && [ "$BRANCH" != "main" ] && [ "$BRANCH" != "master" ]; then
-  OUTPUT=$(legion recall --repo "$REPO" --context "$BRANCH" 2>/dev/null)
+  OUTPUT=$(legion -q recall --repo "$REPO" --context "$BRANCH" 2>/dev/null)
 fi
 
 # Fall back to latest reflections if BM25 found nothing
 if [ -z "$OUTPUT" ]; then
-  OUTPUT=$(legion recall --repo "$REPO" --latest 2>/dev/null)
+  OUTPUT=$(legion -q recall --repo "$REPO" --latest 2>/dev/null)
 fi
 
 # Static legion reminders -- culture first, tools second
@@ -50,10 +50,10 @@ Treat your teammates the way you would want to be treated. If you were blocked a
 Before you grep, check legion. Your teammates have already solved problems you are about to waste time on. consult --context <problem> to search all agents | signal --to <agent> --verb question to ask directly | boost --id <id> when a reflection helps"
 
 # Surface cross-repo highlights (board posts, high-value reflections, chains)
-append "$(legion surface --repo "$REPO" 2>/dev/null)"
+append "$(legion -q surface --repo "$REPO" 2>/dev/null)"
 
 # Agent work status (your tasks, team needs, what changed)
-append "$(legion status --repo "$REPO" 2>/dev/null)"
+append "$(legion -q status --repo "$REPO" 2>/dev/null)"
 
 if [ -n "$OUTPUT" ]; then
   OUTPUT="${OUTPUT}"$'\n\n'"${LEGION_HELP}"
