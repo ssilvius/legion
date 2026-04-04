@@ -1,13 +1,30 @@
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type { LegionEvent } from "./types.js";
 
+// Maximum content length for channel notifications.
+// Claude Code truncates content beyond this limit silently.
+const MAX_NOTIFICATION_LENGTH = 2000;
+
+// Truncate long content with a pointer to the bullpen.
+function truncateIfNeeded(content: string, id?: string): string {
+  if (content.length <= MAX_NOTIFICATION_LENGTH) return content;
+  const truncated = content.slice(0, MAX_NOTIFICATION_LENGTH);
+  const hint = id
+    ? `\n\n[truncated -- full content on bullpen, id: ${id}]`
+    : "\n\n[truncated -- full content on bullpen]";
+  return truncated + hint;
+}
+
 // Format an event into a human-readable channel message.
 function formatEvent(event: LegionEvent): string {
   switch (event.type) {
     case "post":
-      return `[post] ${event.from}: ${event.text}`;
+      return truncateIfNeeded(`[post] ${event.from}: ${event.text}`, event.id);
     case "signal":
-      return `[signal] @${event.to} ${event.verb}${event.status ? ":" + event.status : ""} from ${event.from}${event.note ? " -- " + event.note : ""}`;
+      return truncateIfNeeded(
+        `[signal] @${event.to} ${event.verb}${event.status ? ":" + event.status : ""} from ${event.from}${event.note ? " -- " + event.note : ""}`,
+        event.id
+      );
     case "task": {
       const prio =
         event.priority !== "med" ? ` [${event.priority}]` : "";
