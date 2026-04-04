@@ -227,7 +227,9 @@ pub fn resolve_config(legion_repo: &str) -> Option<(String, String, String)> {
 
     let repos = config.get("repos")?.as_array()?;
     for repo in repos {
-        let name = repo.get("name").and_then(|v| v.as_str())?;
+        let Some(name) = repo.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
         if name != legion_repo {
             continue;
         }
@@ -236,7 +238,9 @@ pub fn resolve_config(legion_repo: &str) -> Option<(String, String, String)> {
             .and_then(|v| v.as_str())
             .unwrap_or("github");
         let github = repo.get("github").and_then(|v| v.as_str());
-        let workdir = repo.get("workdir").and_then(|v| v.as_str())?;
+        let Some(workdir) = repo.get("workdir").and_then(|v| v.as_str()) else {
+            continue;
+        };
 
         if let Some(gh) = github {
             return Some((worksource.to_string(), gh.to_string(), workdir.to_string()));
