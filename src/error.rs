@@ -51,6 +51,9 @@ pub enum LegionError {
     #[error("invalid card status: {0}")]
     InvalidCardStatus(String),
 
+    #[error("work source error: {0}")]
+    WorkSource(String),
+
     #[error("server error: {0}")]
     Server(String),
 

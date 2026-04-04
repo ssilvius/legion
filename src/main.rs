@@ -18,6 +18,7 @@ mod task;
 #[cfg(test)]
 mod testutil;
 mod watch;
+mod worksource;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1020,8 +1021,18 @@ fn main() -> error::Result<()> {
 
             // Validate card transition BEFORE posting announcements
             if let Some(ref card_id) = id {
-                kanban::transition_card(&database, card_id, kanban::Action::Done, Some(&text))?;
+                let card =
+                    kanban::transition_card(&database, card_id, kanban::Action::Done, Some(&text))?;
                 println!("{card_id}");
+
+                // Close linked external issue if present
+                if let (Some(url), Some(source)) = (&card.source_url, &card.source_type)
+                    && let Some(number) = worksource::extract_issue_number(url)
+                    && let Some((_, source_repo, _)) = worksource::resolve_config(&repo)
+                    && let Err(e) = worksource::close_issue(source, &source_repo, number)
+                {
+                    eprintln!("[legion] failed to close {source} issue #{number}: {e}");
+                }
             }
 
             let announcement = format!("{repo} completed: {text}");
@@ -1060,6 +1071,15 @@ fn main() -> error::Result<()> {
         Commands::Work { repo, peek } => {
             let base = data_dir()?;
             let database = db::Database::open(&base.join("legion.db"))?;
+
+            // Sync from external work sources before checking the queue
+            if let Some((plugin, source_repo, workdir)) = worksource::resolve_config(&repo) {
+                match worksource::sync_issues(&database, &plugin, &source_repo, &workdir, &repo) {
+                    Ok(n) if n > 0 => info!("[legion] synced {n} new issues from {plugin}"),
+                    Ok(_) => {}
+                    Err(e) => eprintln!("[legion] work source sync failed: {e}"),
+                }
+            }
 
             let card = if peek {
                 kanban::peek_work(&database, &repo)?
