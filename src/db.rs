@@ -1571,6 +1571,81 @@ impl Database {
         )?;
         Ok(rows as u64)
     }
+
+    /// Rename a repo across all tables. Returns total rows updated.
+    pub fn rename_repo(&self, from: &str, to: &str) -> Result<RenameCounts> {
+        // unchecked_transaction because Database uses &self (shared ref),
+        // but rusqlite::Connection::transaction() requires &mut self.
+        // Safe here: no concurrent access within this function.
+        let tx = self.conn.unchecked_transaction()?;
+
+        let reflections = tx.execute(
+            "UPDATE reflections SET repo = ?1 WHERE repo = ?2",
+            [to, from],
+        )? as u64;
+
+        let tasks_from = tx.execute(
+            "UPDATE tasks SET from_repo = ?1 WHERE from_repo = ?2",
+            [to, from],
+        )? as u64;
+
+        let tasks_to = tx.execute(
+            "UPDATE tasks SET to_repo = ?1 WHERE to_repo = ?2",
+            [to, from],
+        )? as u64;
+
+        // Delete target rows first to avoid PRIMARY KEY collision,
+        // then rename. The old read-state for `to` is stale anyway.
+        tx.execute("DELETE FROM board_reads WHERE reader_repo = ?1", [to])?;
+        let board_reads = tx.execute(
+            "UPDATE board_reads SET reader_repo = ?1 WHERE reader_repo = ?2",
+            [to, from],
+        )? as u64;
+
+        // Same for watch_handled: delete target's rows first to
+        // avoid composite PK collision on (signal_id, repo_name).
+        tx.execute("DELETE FROM watch_handled WHERE repo_name = ?1", [to])?;
+        let watch_handled = tx.execute(
+            "UPDATE watch_handled SET repo_name = ?1 WHERE repo_name = ?2",
+            [to, from],
+        )? as u64;
+
+        let schedules =
+            tx.execute("UPDATE schedules SET repo = ?1 WHERE repo = ?2", [to, from])? as u64;
+
+        tx.commit()?;
+
+        Ok(RenameCounts {
+            reflections,
+            tasks_from,
+            tasks_to,
+            board_reads,
+            watch_handled,
+            schedules,
+        })
+    }
+}
+
+/// Counts of rows updated by a repo rename.
+#[derive(Debug)]
+pub struct RenameCounts {
+    pub reflections: u64,
+    pub tasks_from: u64,
+    pub tasks_to: u64,
+    pub board_reads: u64,
+    pub watch_handled: u64,
+    pub schedules: u64,
+}
+
+impl RenameCounts {
+    pub fn total(&self) -> u64 {
+        self.reflections
+            + self.tasks_from
+            + self.tasks_to
+            + self.board_reads
+            + self.watch_handled
+            + self.schedules
+    }
 }
 
 /// Map a database row to a HealthSample struct.

@@ -107,6 +107,26 @@ impl Default for WatchConfig {
     }
 }
 
+/// Rename a repo in watch.toml. Does string replacement to preserve comments
+/// and formatting. Returns true if the file was modified.
+pub fn rename_in_config(path: &Path, from: &str, to: &str) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+
+    let contents = std::fs::read_to_string(path)?;
+    let needle = format!("name = \"{}\"", from);
+    let replacement = format!("name = \"{}\"", to);
+
+    if !contents.contains(&needle) {
+        return Ok(false);
+    }
+
+    let updated = contents.replace(&needle, &replacement);
+    std::fs::write(path, updated)?;
+    Ok(true)
+}
+
 /// Load watch config from the given path. Returns a default config if the
 /// file does not exist.
 pub fn load_config(path: &Path) -> Result<WatchConfig> {

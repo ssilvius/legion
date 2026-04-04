@@ -227,6 +227,16 @@ enum Commands {
     /// Rebuild the search index from the database
     Reindex,
 
+    /// Rename a repo across all tables and watch config
+    Rename {
+        /// Current repo name
+        #[arg(long)]
+        from: String,
+        /// New repo name
+        #[arg(long)]
+        to: String,
+    },
+
     /// Compute embeddings for all reflections that are missing them
     Backfill,
 
@@ -968,6 +978,43 @@ fn main() -> error::Result<()> {
             let count = reflections.len();
             index.rebuild(&reflections)?;
             info!("[legion] reindexed {} reflections", count);
+        }
+        Commands::Rename { from, to } => {
+            if from == to {
+                eprintln!("[legion] source and destination are the same, nothing to do");
+                return Ok(());
+            }
+
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+            let index = search::SearchIndex::open(&base.join("index"))?;
+
+            let counts = database.rename_repo(&from, &to)?;
+            eprintln!(
+                "[legion] renamed '{}' -> '{}': {} reflections, {} tasks (from), {} tasks (to), {} board reads, {} watch handled, {} schedules",
+                from,
+                to,
+                counts.reflections,
+                counts.tasks_from,
+                counts.tasks_to,
+                counts.board_reads,
+                counts.watch_handled,
+                counts.schedules
+            );
+
+            // Reindex since repo name is in the search index
+            let reflections = database.get_all_for_reindex()?;
+            let reindex_count = reflections.len();
+            index.rebuild(&reflections)?;
+            eprintln!("[legion] reindexed {} reflections", reindex_count);
+
+            // Update watch.toml
+            let watch_path = base.join("watch.toml");
+            if watch::rename_in_config(&watch_path, &from, &to)? {
+                eprintln!("[legion] updated watch.toml: '{}' -> '{}'", from, to);
+            }
+
+            eprintln!("[legion] total: {} rows updated", counts.total());
         }
         Commands::Backfill => {
             let base = data_dir()?;
