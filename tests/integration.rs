@@ -1339,3 +1339,346 @@ fn task_surface_shows_pending() {
         "expected task attribution, got: {stdout}"
     );
 }
+
+// --- Kanban CLI tests ---
+
+#[test]
+fn kanban_create_and_list() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "kanban",
+            "create",
+            "--from",
+            "sean",
+            "--to",
+            "kelex",
+            "--text",
+            "implement search",
+            "--priority",
+            "high",
+            "--labels",
+            "backend,search",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "kanban create failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    assert_eq!(id.len(), 36, "expected UUID, got: {id}");
+
+    let out = legion_cmd(dir.path())
+        .args(["kanban", "list", "--repo", "kelex"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("implement search"),
+        "expected card text, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("[high]"),
+        "expected priority, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("{backend,search}"),
+        "expected labels, got: {stdout}"
+    );
+}
+
+#[test]
+fn kanban_work_picks_up_card() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Create two cards with different priorities
+    legion_cmd(dir.path())
+        .args([
+            "kanban",
+            "create",
+            "--from",
+            "sean",
+            "--to",
+            "kelex",
+            "--text",
+            "low prio",
+            "--priority",
+            "low",
+        ])
+        .output()
+        .unwrap();
+    legion_cmd(dir.path())
+        .args([
+            "kanban",
+            "create",
+            "--from",
+            "sean",
+            "--to",
+            "kelex",
+            "--text",
+            "high prio",
+            "--priority",
+            "high",
+        ])
+        .output()
+        .unwrap();
+
+    // Work should pick up the high priority card
+    let out = legion_cmd(dir.path())
+        .args(["work", "--repo", "kelex"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("high prio"),
+        "expected high prio card, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("Priority: high"),
+        "expected priority line, got: {stdout}"
+    );
+}
+
+#[test]
+fn kanban_work_empty_queue() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Init DB
+    legion_cmd(dir.path())
+        .args(["reflect", "--repo", "test", "--text", "setup"])
+        .output()
+        .unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args(["--verbose", "work", "--repo", "kelex"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no pending work"),
+        "expected no-work message, got: {stderr}"
+    );
+}
+
+#[test]
+fn kanban_work_peek_does_not_accept() {
+    let dir = tempfile::tempdir().unwrap();
+
+    legion_cmd(dir.path())
+        .args([
+            "kanban",
+            "create",
+            "--from",
+            "sean",
+            "--to",
+            "kelex",
+            "--text",
+            "peek test",
+            "--priority",
+            "med",
+        ])
+        .output()
+        .unwrap();
+
+    // Peek should show card but not accept
+    let out = legion_cmd(dir.path())
+        .args(["work", "--repo", "kelex", "--peek"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("peek test"), "expected card, got: {stdout}");
+
+    // Card should still be pending (work without peek should still get it)
+    let out = legion_cmd(dir.path())
+        .args(["work", "--repo", "kelex"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("peek test"),
+        "card should still be available, got: {stdout}"
+    );
+}
+
+#[test]
+fn kanban_full_lifecycle() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Create
+    let out = legion_cmd(dir.path())
+        .args([
+            "kanban",
+            "create",
+            "--from",
+            "sean",
+            "--to",
+            "kelex",
+            "--text",
+            "lifecycle test",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+
+    // Accept
+    let out = legion_cmd(dir.path())
+        .args(["kanban", "accept", "--id", &id])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "accept failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Review
+    let out = legion_cmd(dir.path())
+        .args(["kanban", "review", "--id", &id])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "review failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Done via kanban
+    let out = legion_cmd(dir.path())
+        .args(["done", "--repo", "kelex", "--text", "shipped", "--id", &id])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "done failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn kanban_block_unblock() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "kanban",
+            "create",
+            "--from",
+            "sean",
+            "--to",
+            "kelex",
+            "--text",
+            "block test",
+        ])
+        .output()
+        .unwrap();
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+
+    legion_cmd(dir.path())
+        .args(["kanban", "accept", "--id", &id])
+        .output()
+        .unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "kanban",
+            "block",
+            "--id",
+            &id,
+            "--reason",
+            "waiting on upstream",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "block failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out = legion_cmd(dir.path())
+        .args(["kanban", "unblock", "--id", &id])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "unblock failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn kanban_invalid_transition() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "kanban",
+            "create",
+            "--from",
+            "sean",
+            "--to",
+            "kelex",
+            "--text",
+            "invalid test",
+        ])
+        .output()
+        .unwrap();
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+
+    // Try to review a pending card (should fail -- must accept first)
+    let out = legion_cmd(dir.path())
+        .args(["kanban", "review", "--id", &id])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "review of pending card should fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("InvalidCardTransition"),
+        "expected transition error, got: {stderr}"
+    );
+}
+
+#[test]
+fn kanban_with_source_url() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "kanban",
+            "create",
+            "--from",
+            "sean",
+            "--to",
+            "kelex",
+            "--text",
+            "github issue",
+            "--source-url",
+            "https://github.com/ssilvius/legion/issues/42",
+            "--source-type",
+            "github",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    assert_eq!(id.len(), 36);
+
+    let out = legion_cmd(dir.path())
+        .args(["kanban", "list", "--repo", "kelex"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("github.com"),
+        "expected source URL in output, got: {stdout}"
+    );
+}

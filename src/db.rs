@@ -1310,6 +1310,30 @@ impl Database {
         Ok(())
     }
 
+    /// Assign a backlog card to an agent and transition to pending.
+    ///
+    /// Atomic: updates to_repo, status, and assigned_at in one statement.
+    /// Only works on backlog cards -- returns InvalidCardTransition otherwise.
+    pub fn assign_card(&self, id: &str, to_repo: &str) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let rows = self.conn.execute(
+            "UPDATE tasks SET to_repo = ?1, status = 'pending', \
+             assigned_at = ?2, updated_at = ?3 WHERE id = ?4 AND status = 'backlog'",
+            rusqlite::params![to_repo, now, now, id],
+        )?;
+        if rows == 0 {
+            let exists = self.get_card_by_id(id)?;
+            return match exists {
+                None => Err(LegionError::CardNotFound(id.to_string())),
+                Some(card) => Err(LegionError::InvalidCardTransition {
+                    action: "assign".to_string(),
+                    current: card.status.to_string(),
+                }),
+            };
+        }
+        Ok(())
+    }
+
     /// Get per-agent workload summary.
     pub fn get_agent_workloads(&self) -> Result<Vec<crate::kanban::AgentWorkload>> {
         let mut stmt = self.conn.prepare(

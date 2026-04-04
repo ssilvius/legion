@@ -26,12 +26,22 @@ legion chain --id <reflection-id>
 legion surface --repo <name>
 legion stats --repo <name>
 legion reindex
-legion task create --from <repo> --to <repo> --text "task description" --priority <low|med|high> --context "optional context"
-legion task list --repo <name>               # inbound tasks (assigned to repo)
-legion task list --repo <name> --from        # outbound tasks (created by repo)
-legion task accept --id <task-id>
-legion task done --id <task-id> --note "optional completion note"
-legion task block --id <task-id> --reason "optional reason"
+legion work --repo <name>                    # get next card from scheduler (auto-accepts)
+legion work --repo <name> --peek             # peek at next card without accepting
+legion done --repo <name> --text "what was completed" --id <card-id>  # complete card + announce
+legion kanban create --from <repo> --to <repo> --text "description" --priority <low|med|high|critical>
+legion kanban create --from <repo> --to <repo> --text "..." --labels "tag1,tag2" --source-url "https://..."
+legion kanban list --repo <name>             # inbound cards (assigned to repo)
+legion kanban list --repo <name> --from      # outbound cards (created by repo)
+legion kanban accept --id <card-id>          # pending -> in-progress
+legion kanban block --id <card-id> --reason "blocker description"
+legion kanban unblock --id <card-id>         # blocked -> in-progress
+legion kanban review --id <card-id>          # in-progress -> in-review
+legion kanban need-input --id <card-id>      # in-progress -> needs-input (blocked on human)
+legion kanban resume --id <card-id>          # needs-input/in-review -> in-progress
+legion kanban cancel --id <card-id>          # any active -> cancelled
+legion kanban assign --id <card-id> --to <repo>  # backlog -> assigned to agent
+legion kanban reopen --id <card-id>          # done/cancelled -> backlog
 legion watch                                 # auto-wake sleeping agents on signal arrival
 legion -v <command>                          # show informational messages (quiet by default)
 ```

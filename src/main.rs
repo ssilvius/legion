@@ -4,7 +4,7 @@ mod embed;
 mod error;
 mod health;
 mod init;
-#[allow(dead_code)]
+#[allow(dead_code)] // Items used by tests + pending surface/status/serve migration
 mod kanban;
 mod recall;
 mod reflect;
@@ -266,9 +266,30 @@ enum Commands {
         /// Description of what was completed
         #[arg(long)]
         text: String,
+
+        /// Card ID to mark as complete (optional)
+        #[arg(long)]
+        id: Option<String>,
     },
 
-    /// Manage delegated tasks between agents
+    /// Get next work item from the scheduler
+    Work {
+        /// Repository name
+        #[arg(long)]
+        repo: String,
+
+        /// Peek only (don't auto-accept the card)
+        #[arg(long)]
+        peek: bool,
+    },
+
+    /// Manage the kanban board
+    Kanban {
+        #[command(subcommand)]
+        action: KanbanAction,
+    },
+
+    /// Manage delegated tasks between agents (deprecated, use kanban)
     Task {
         #[command(subcommand)]
         action: TaskAction,
@@ -367,6 +388,134 @@ enum TaskAction {
     /// Unblock a blocked task (returns to accepted)
     Unblock {
         /// Task ID
+        #[arg(long)]
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum KanbanAction {
+    /// Create a new card on the kanban board
+    Create {
+        /// Who is creating the card
+        #[arg(long)]
+        from: String,
+
+        /// Which agent this card is assigned to
+        #[arg(long)]
+        to: String,
+
+        /// Card description
+        #[arg(long)]
+        text: String,
+
+        /// Additional context
+        #[arg(long)]
+        context: Option<String>,
+
+        /// Priority: low, med, high, critical (default: med)
+        #[arg(long, default_value = "med", value_parser = ["low", "med", "high", "critical"])]
+        priority: String,
+
+        /// Comma-separated labels
+        #[arg(long)]
+        labels: Option<String>,
+
+        /// Parent card ID (for delegation chains)
+        #[arg(long)]
+        parent: Option<String>,
+
+        /// Link to external issue (e.g., GitHub issue URL)
+        #[arg(long)]
+        source_url: Option<String>,
+
+        /// Source type (e.g., "github", "jira")
+        #[arg(long)]
+        source_type: Option<String>,
+    },
+
+    /// List cards for a repo
+    List {
+        /// Repository name
+        #[arg(long)]
+        repo: String,
+
+        /// Show outbound cards (created by this repo) instead of inbound
+        #[arg(long)]
+        from: bool,
+    },
+
+    /// Accept a pending card (move to in-progress)
+    Accept {
+        /// Card ID
+        #[arg(long)]
+        id: String,
+    },
+
+    /// Block a card (technical blocker)
+    Block {
+        /// Card ID
+        #[arg(long)]
+        id: String,
+
+        /// Reason for blocking
+        #[arg(long)]
+        reason: Option<String>,
+    },
+
+    /// Unblock a blocked card (returns to in-progress)
+    Unblock {
+        /// Card ID
+        #[arg(long)]
+        id: String,
+    },
+
+    /// Mark a card for review
+    Review {
+        /// Card ID
+        #[arg(long)]
+        id: String,
+    },
+
+    /// Mark a card as needing human input
+    NeedInput {
+        /// Card ID
+        #[arg(long)]
+        id: String,
+
+        /// What input is needed
+        #[arg(long)]
+        reason: Option<String>,
+    },
+
+    /// Resume a card from needs-input or in-review
+    Resume {
+        /// Card ID
+        #[arg(long)]
+        id: String,
+    },
+
+    /// Cancel a card
+    Cancel {
+        /// Card ID
+        #[arg(long)]
+        id: String,
+    },
+
+    /// Assign a backlog card to an agent
+    Assign {
+        /// Card ID
+        #[arg(long)]
+        id: String,
+
+        /// Target agent/repo
+        #[arg(long)]
+        to: String,
+    },
+
+    /// Reopen a done or cancelled card
+    Reopen {
+        /// Card ID
         #[arg(long)]
         id: String,
     },
@@ -864,10 +1013,16 @@ fn main() -> error::Result<()> {
             let items = status::get_needs(&database, &repo)?;
             print!("{}", status::format_needs(&repo, &items));
         }
-        Commands::Done { repo, text } => {
+        Commands::Done { repo, text, id } => {
             let base = data_dir()?;
             let database = db::Database::open(&base.join("legion.db"))?;
             let index = search::SearchIndex::open(&base.join("index"))?;
+
+            // Validate card transition BEFORE posting announcements
+            if let Some(ref card_id) = id {
+                kanban::transition_card(&database, card_id, kanban::Action::Done, Some(&text))?;
+                println!("{card_id}");
+            }
 
             let announcement = format!("{repo} completed: {text}");
             let reflection = database.insert_reflection_with_meta(
@@ -900,6 +1055,113 @@ fn main() -> error::Result<()> {
 
             if blocked_agents.is_empty() {
                 info!("[legion] no blocked agents found");
+            }
+        }
+        Commands::Work { repo, peek } => {
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+
+            let card = if peek {
+                kanban::peek_work(&database, &repo)?
+            } else {
+                kanban::next_work(&database, &repo)?
+            };
+
+            match card {
+                Some(c) => print!("{}", kanban::format_work_card(&c)),
+                None => info!("[legion] no pending work for {repo}"),
+            }
+        }
+        Commands::Kanban { action } => {
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+
+            match action {
+                KanbanAction::Create {
+                    from,
+                    to,
+                    text,
+                    context,
+                    priority,
+                    labels,
+                    parent,
+                    source_url,
+                    source_type,
+                } => {
+                    let id = kanban::create_card(
+                        &database,
+                        &from,
+                        &to,
+                        &text,
+                        context.as_deref(),
+                        &priority,
+                        labels.as_deref(),
+                        parent.as_deref(),
+                        source_url.as_deref(),
+                        source_type.as_deref(),
+                    )?;
+                    println!("{id}");
+                }
+                KanbanAction::List { repo, from } => {
+                    let direction = if from {
+                        kanban::Direction::Outbound
+                    } else {
+                        kanban::Direction::Inbound
+                    };
+                    let cards = kanban::list_cards(&database, &repo, direction)?;
+                    let output = kanban::format_card_list(&cards, &repo, direction);
+                    if output.is_empty() {
+                        info!("[legion] no cards found");
+                    } else {
+                        print!("{output}");
+                    }
+                }
+                KanbanAction::Accept { id } => {
+                    kanban::transition_card(&database, &id, kanban::Action::Accept, None)?;
+                    println!("{id}");
+                }
+                KanbanAction::Block { id, reason } => {
+                    kanban::transition_card(
+                        &database,
+                        &id,
+                        kanban::Action::Block,
+                        reason.as_deref(),
+                    )?;
+                    println!("{id}");
+                }
+                KanbanAction::Unblock { id } => {
+                    kanban::transition_card(&database, &id, kanban::Action::Unblock, None)?;
+                    println!("{id}");
+                }
+                KanbanAction::Review { id } => {
+                    kanban::transition_card(&database, &id, kanban::Action::Review, None)?;
+                    println!("{id}");
+                }
+                KanbanAction::NeedInput { id, reason } => {
+                    kanban::transition_card(
+                        &database,
+                        &id,
+                        kanban::Action::NeedInput,
+                        reason.as_deref(),
+                    )?;
+                    println!("{id}");
+                }
+                KanbanAction::Resume { id } => {
+                    kanban::transition_card(&database, &id, kanban::Action::Resume, None)?;
+                    println!("{id}");
+                }
+                KanbanAction::Cancel { id } => {
+                    kanban::transition_card(&database, &id, kanban::Action::Cancel, None)?;
+                    println!("{id}");
+                }
+                KanbanAction::Assign { id, to } => {
+                    database.assign_card(&id, &to)?;
+                    println!("{id}");
+                }
+                KanbanAction::Reopen { id } => {
+                    kanban::transition_card(&database, &id, kanban::Action::Reopen, None)?;
+                    println!("{id}");
+                }
             }
         }
         Commands::Task { action } => {
