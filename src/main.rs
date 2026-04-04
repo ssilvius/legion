@@ -1043,7 +1043,18 @@ fn main() -> error::Result<()> {
             stats::stats(&database, repo.as_deref())?;
         }
         Commands::Serve { port } => {
-            serve::run_server(port, data_dir()?)?;
+            let base = data_dir()?;
+            let watch_path = base.join("watch.toml");
+            if watch_path.exists() {
+                let contents = std::fs::read_to_string(&watch_path)?;
+                let config: watch::WatchConfig = toml::from_str(&contents)?;
+                if !config.serve {
+                    return Err(error::LegionError::Server(
+                        "serve is not enabled on this node. Set serve = true in watch.toml to designate this machine as the dashboard server.".to_string(),
+                    ));
+                }
+            }
+            serve::run_server(port, base)?;
         }
         Commands::Status { repo } => {
             let base = data_dir()?;
