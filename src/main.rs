@@ -20,9 +20,21 @@ mod testutil;
 mod watch;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::{Parser, Subcommand};
 use directories::ProjectDirs;
+
+static VERBOSE: AtomicBool = AtomicBool::new(false);
+
+/// Print an informational message to stderr, only when --verbose is set.
+macro_rules! info {
+    ($($arg:tt)*) => {
+        if VERBOSE.load(Ordering::Relaxed) {
+            eprintln!($($arg)*);
+        }
+    };
+}
 
 #[derive(Parser)]
 #[command(
@@ -30,6 +42,10 @@ use directories::ProjectDirs;
     about = "Agent specialization through deliberate practice"
 )]
 struct Cli {
+    /// Show informational messages on stderr (quiet by default)
+    #[arg(long, short, global = true)]
+    verbose: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -423,6 +439,9 @@ fn data_dir() -> error::Result<PathBuf> {
 }
 
 /// Run a compound command (text or transcript) across multiple repos with metadata.
+///
+/// Prints each stored ID to stdout (one per repo) so callers and scripts
+/// can capture them. Returns an error if any repo fails.
 #[allow(clippy::too_many_arguments)]
 fn run_compound_command_with_meta(
     db: &db::Database,
@@ -437,14 +456,14 @@ fn run_compound_command_with_meta(
         &str,
         &str,
         &db::ReflectionMeta,
-    ) -> error::Result<()>,
+    ) -> error::Result<String>,
     from_transcript: fn(
         &db::Database,
         &search::SearchIndex,
         &str,
         &std::path::Path,
         &db::ReflectionMeta,
-    ) -> error::Result<()>,
+    ) -> error::Result<String>,
     label: &str,
 ) -> error::Result<()> {
     if text.is_none() && transcript.is_none() {
@@ -459,9 +478,15 @@ fn run_compound_command_with_meta(
             (Some(_), Some(_)) => return Err(error::LegionError::NoReflectionInput),
             (None, None) => unreachable!("guarded by early return above"),
         };
-        if let Err(e) = result {
-            eprintln!("[legion] error {label} for {r}: {e}");
-            had_error = true;
+        match result {
+            Ok(id) => {
+                info!("[legion] {label} for {r} ({id})");
+                println!("{id}");
+            }
+            Err(e) => {
+                eprintln!("[legion] error {label} for {r}: {e}");
+                had_error = true;
+            }
         }
     }
     if had_error {
@@ -505,8 +530,22 @@ fn backfill_embeddings(db: &db::Database, model: &embed::EmbedModel) -> error::R
     Ok(count)
 }
 
+/// Raise the soft file-descriptor limit to the hard limit.
+///
+/// macOS ships a low soft limit (often 2560) which Tantivy can exhaust
+/// when opening index segments. The hard limit is much higher (or unlimited).
+/// This is a no-op on failure -- the worst case is the original limit.
+fn raise_fd_limit() {
+    match rlimit::increase_nofile_limit(u64::MAX) {
+        Ok(_) => {}
+        Err(e) => eprintln!("[legion] warning: could not raise fd limit: {e}"),
+    }
+}
+
 fn main() -> error::Result<()> {
+    raise_fd_limit();
     let cli = Cli::parse();
+    VERBOSE.store(cli.verbose, Ordering::Relaxed);
 
     match cli.command {
         Commands::Reflect {
@@ -542,7 +581,7 @@ fn main() -> error::Result<()> {
             if let Some(model) = try_load_embed_model() {
                 let n = backfill_embeddings(&database, &model)?;
                 if n > 0 {
-                    eprintln!("[legion] embedded {} reflections", n);
+                    info!("[legion] embedded {} reflections", n);
                 }
             }
         }
@@ -583,7 +622,7 @@ fn main() -> error::Result<()> {
             };
             let output = recall::format_for_consult(&result);
             if output.is_empty() {
-                eprintln!("[legion] no reflections matched context: \"{}\"", context);
+                info!("[legion] no reflections matched context: \"{}\"", context);
             } else {
                 print!("{output}");
             }
@@ -621,7 +660,7 @@ fn main() -> error::Result<()> {
             if let Some(model) = try_load_embed_model() {
                 let n = backfill_embeddings(&database, &model)?;
                 if n > 0 {
-                    eprintln!("[legion] embedded {} posts", n);
+                    info!("[legion] embedded {} posts", n);
                 }
             }
         }
@@ -671,15 +710,23 @@ fn main() -> error::Result<()> {
                 parent_id: follows,
             };
 
-            for r in &repo {
-                board::post_from_text_with_meta(&database, &index, r, &text, &meta)?;
-            }
+            run_compound_command_with_meta(
+                &database,
+                &index,
+                &repo,
+                &Some(text),
+                &None,
+                &meta,
+                board::post_from_text_with_meta,
+                board::post_from_transcript_with_meta,
+                "sending signal",
+            )?;
 
             // Compute embeddings for new signals
             if let Some(model) = try_load_embed_model() {
                 let n = backfill_embeddings(&database, &model)?;
                 if n > 0 {
-                    eprintln!("[legion] embedded {} signals", n);
+                    info!("[legion] embedded {} signals", n);
                 }
             }
         }
@@ -688,7 +735,7 @@ fn main() -> error::Result<()> {
             let database = db::Database::open(&base.join("legion.db"))?;
 
             if database.boost_reflection(&id)? {
-                eprintln!("[legion] boosted reflection {}", id);
+                info!("[legion] boosted reflection {}", id);
             } else {
                 eprintln!("[legion] reflection not found: {}", id);
             }
@@ -699,7 +746,7 @@ fn main() -> error::Result<()> {
 
             let chain = database.get_chain(&id)?;
             if chain.is_empty() {
-                eprintln!("[legion] no chain found for {}", id);
+                info!("[legion] no chain found for {}", id);
             } else {
                 for (i, r) in chain.iter().enumerate() {
                     let prefix = if i == 0 {
@@ -715,7 +762,7 @@ fn main() -> error::Result<()> {
                         .unwrap_or_default();
                     let truncated: String = r.text.chars().take(80).collect();
                     let ellipsis = if r.text.len() > 80 { "..." } else { "" };
-                    eprintln!(
+                    println!(
                         "{}{} {}{}: {}{}",
                         prefix, r.repo, date, domain_tag, truncated, ellipsis
                     );
@@ -766,7 +813,7 @@ fn main() -> error::Result<()> {
             let reflections = database.get_all_for_reindex()?;
             let count = reflections.len();
             index.rebuild(&reflections)?;
-            eprintln!("[legion] reindexed {} reflections", count);
+            info!("[legion] reindexed {} reflections", count);
         }
         Commands::Backfill => {
             let base = data_dir()?;
@@ -774,7 +821,7 @@ fn main() -> error::Result<()> {
 
             let model = embed::EmbedModel::load()?;
             let count = backfill_embeddings(&database, &model)?;
-            eprintln!("[legion] embedded {} reflections", count);
+            info!("[legion] embedded {} reflections", count);
         }
         Commands::Init { force } => {
             init::init(force)?;
@@ -832,7 +879,7 @@ fn main() -> error::Result<()> {
             if let Err(e) = index.add(&reflection.id, &reflection.repo, &announcement) {
                 eprintln!("[legion] search index add failed: {e}");
             }
-            eprintln!("[legion] done: {text}");
+            info!("[legion] done: {text}");
 
             let blocked_agents = status::find_blocked_agents(&database, &repo)?;
             for agent in &blocked_agents {
@@ -848,11 +895,11 @@ fn main() -> error::Result<()> {
                 if let Err(e) = index.add(&notify_ref.id, &notify_ref.repo, &notify_text) {
                     eprintln!("[legion] search index add failed: {e}");
                 }
-                eprintln!("[legion] notified {agent} (was blocked on {repo})");
+                info!("[legion] notified {agent} (was blocked on {repo})");
             }
 
             if blocked_agents.is_empty() {
-                eprintln!("[legion] no blocked agents found");
+                info!("[legion] no blocked agents found");
             }
         }
         Commands::Task { action } => {
@@ -875,7 +922,8 @@ fn main() -> error::Result<()> {
                         context.as_deref(),
                         &priority,
                     )?;
-                    eprintln!("[legion] task created: {} -> {} ({})", from, to, id);
+                    println!("{id}");
+                    info!("[legion] task created: {} -> {}", from, to);
                 }
                 TaskAction::List { repo, from } => {
                     let direction = if from {
@@ -886,26 +934,26 @@ fn main() -> error::Result<()> {
                     let tasks = task::list_tasks(&database, &repo, direction)?;
                     let output = task::format_task_list(&tasks, &repo, direction);
                     if output.is_empty() {
-                        eprintln!("[legion] no tasks found");
+                        info!("[legion] no tasks found");
                     } else {
                         print!("{output}");
                     }
                 }
                 TaskAction::Accept { id } => {
                     task::accept_task(&database, &id)?;
-                    eprintln!("[legion] task accepted: {}", id);
+                    info!("[legion] task accepted: {}", id);
                 }
                 TaskAction::Done { id, note } => {
                     task::complete_task(&database, &id, note.as_deref())?;
-                    eprintln!("[legion] task completed: {}", id);
+                    info!("[legion] task completed: {}", id);
                 }
                 TaskAction::Block { id, reason } => {
                     task::block_task(&database, &id, reason.as_deref())?;
-                    eprintln!("[legion] task blocked: {}", id);
+                    info!("[legion] task blocked: {}", id);
                 }
                 TaskAction::Unblock { id } => {
                     task::unblock_task(&database, &id)?;
-                    eprintln!("[legion] task unblocked: {}", id);
+                    info!("[legion] task unblocked: {}", id);
                 }
             }
         }
@@ -930,12 +978,13 @@ fn main() -> error::Result<()> {
                         active_start.as_deref(),
                         active_end.as_deref(),
                     )?;
-                    eprintln!("[legion] schedule created: {} ({})", name, id);
+                    println!("{id}");
+                    info!("[legion] schedule created: {}", name);
                 }
                 ScheduleAction::List => {
                     let schedules = database.list_schedules()?;
                     if schedules.is_empty() {
-                        eprintln!("[legion] no schedules");
+                        info!("[legion] no schedules");
                     } else {
                         println!("[Legion] Schedules:");
                         for s in &schedules {
@@ -963,21 +1012,21 @@ fn main() -> error::Result<()> {
                 }
                 ScheduleAction::Enable { id } => {
                     if database.toggle_schedule(&id, true)? {
-                        eprintln!("[legion] schedule enabled: {}", id);
+                        info!("[legion] schedule enabled: {}", id);
                     } else {
                         eprintln!("[legion] schedule not found: {}", id);
                     }
                 }
                 ScheduleAction::Disable { id } => {
                     if database.toggle_schedule(&id, false)? {
-                        eprintln!("[legion] schedule disabled: {}", id);
+                        info!("[legion] schedule disabled: {}", id);
                     } else {
                         eprintln!("[legion] schedule not found: {}", id);
                     }
                 }
                 ScheduleAction::Delete { id } => {
                     if database.delete_schedule(&id)? {
-                        eprintln!("[legion] schedule deleted: {}", id);
+                        info!("[legion] schedule deleted: {}", id);
                     } else {
                         eprintln!("[legion] schedule not found: {}", id);
                     }
@@ -1057,7 +1106,7 @@ fn main() -> error::Result<()> {
                     if !history.is_empty() {
                         print_health_trend(&history);
                     } else {
-                        eprintln!("\n  (no trend data -- start `legion watch` for history)");
+                        info!("\n  (no trend data -- start `legion watch` for history)");
                     }
                 }
             }
