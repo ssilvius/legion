@@ -42,6 +42,15 @@ pub enum LegionError {
     #[error("invalid state transition: cannot {action} a task with status '{current}'")]
     InvalidTaskTransition { action: String, current: String },
 
+    #[error("card not found: {0}")]
+    CardNotFound(String),
+
+    #[error("invalid card transition: cannot {action} a card in status '{current}'")]
+    InvalidCardTransition { action: String, current: String },
+
+    #[error("invalid card status: {0}")]
+    InvalidCardStatus(String),
+
     #[error("server error: {0}")]
     Server(String),
 

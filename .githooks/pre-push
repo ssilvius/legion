@@ -1,0 +1,50 @@
+#!/bin/bash
+# Pre-push: run full PR review on branch changes via Claude Code.
+# Catches bugs, silent failures, and test gaps before code reaches remote.
+
+# Get the branch being pushed
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+if [ "$BRANCH" = "main" ] || [ "$BRANCH" = "master" ]; then
+  # Don't review pushes to main (those come through PRs)
+  exit 0
+fi
+
+# Get the diff against the base branch
+BASE=$(git merge-base main HEAD 2>/dev/null || git merge-base master HEAD 2>/dev/null)
+if [ -z "$BASE" ]; then
+  exit 0
+fi
+
+DIFF=$(git diff "$BASE"...HEAD)
+if [ -z "$DIFF" ]; then
+  exit 0
+fi
+
+CHANGED_FILES=$(git diff --name-only "$BASE"...HEAD)
+LINE_COUNT=$(echo "$DIFF" | wc -l | tr -d ' ')
+
+echo "[pre-push] Running PR review on ${LINE_COUNT} lines of changes across branch ${BRANCH}..."
+
+RESULT=$(echo "$DIFF" | claude -p "You are a senior code reviewer. Review this diff for:
+1. Bugs and logic errors (CRITICAL)
+2. Silent failures -- catch blocks that swallow errors, fallbacks that hide problems (CRITICAL)
+3. Security issues -- injection, unsafe input handling (CRITICAL)
+4. Missing error handling at system boundaries (HIGH)
+5. Test coverage gaps for new functionality (HIGH)
+
+For each issue found, rate it CRITICAL or HIGH. If you find any CRITICAL issues, start with BLOCK: and list them. If only HIGH issues or no issues, start with PASS: and list any HIGH items as warnings. Be concise -- file:line format." 2>/dev/null)
+
+if [ $? -ne 0 ]; then
+  echo "[pre-push] Claude Code unavailable, skipping review"
+  exit 0
+fi
+
+echo "$RESULT"
+
+if echo "$RESULT" | grep -q "^BLOCK:"; then
+  echo ""
+  echo "[pre-push] Review found critical issues. Fix them before pushing."
+  exit 1
+fi
+
+exit 0

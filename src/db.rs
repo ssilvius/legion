@@ -17,6 +17,16 @@ pub(crate) fn format_date(iso_timestamp: &str) -> &str {
     }
 }
 
+/// Which timestamp column to set during a card status update.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub enum CardTimestamp {
+    Assigned,
+    Started,
+    Completed,
+    None,
+}
+
 /// Persistent storage for reflections backed by SQLite.
 pub struct Database {
     conn: Connection,
@@ -389,6 +399,47 @@ impl Database {
             );
             CREATE INDEX IF NOT EXISTS idx_health_hostname ON health_samples(hostname);
             CREATE INDEX IF NOT EXISTS idx_health_sampled ON health_samples(sampled_at);",
+        )?;
+
+        // Migration 9: Kanban upgrade -- new columns on tasks table.
+        if !Self::has_column(conn, "tasks", "labels")? {
+            conn.execute_batch("ALTER TABLE tasks ADD COLUMN labels TEXT")?;
+        }
+        if !Self::has_column(conn, "tasks", "parent_card_id")? {
+            conn.execute_batch("ALTER TABLE tasks ADD COLUMN parent_card_id TEXT")?;
+        }
+        if !Self::has_column(conn, "tasks", "source_url")? {
+            conn.execute_batch("ALTER TABLE tasks ADD COLUMN source_url TEXT")?;
+        }
+        if !Self::has_column(conn, "tasks", "source_type")? {
+            conn.execute_batch("ALTER TABLE tasks ADD COLUMN source_type TEXT")?;
+        }
+        if !Self::has_column(conn, "tasks", "sort_order")? {
+            conn.execute_batch(
+                "ALTER TABLE tasks ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0",
+            )?;
+        }
+        if !Self::has_column(conn, "tasks", "assigned_at")? {
+            conn.execute_batch("ALTER TABLE tasks ADD COLUMN assigned_at TEXT")?;
+        }
+        if !Self::has_column(conn, "tasks", "started_at")? {
+            conn.execute_batch("ALTER TABLE tasks ADD COLUMN started_at TEXT")?;
+        }
+        if !Self::has_column(conn, "tasks", "completed_at")? {
+            conn.execute_batch("ALTER TABLE tasks ADD COLUMN completed_at TEXT")?;
+        }
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_card_id);
+             CREATE INDEX IF NOT EXISTS idx_tasks_status_sort ON tasks(status, sort_order, created_at);",
+        )?;
+        // Backfill timestamps for existing tasks based on current status.
+        conn.execute_batch(
+            "UPDATE tasks SET completed_at = updated_at \
+             WHERE status IN ('done', 'cancelled') AND completed_at IS NULL;
+             UPDATE tasks SET started_at = updated_at \
+             WHERE status = 'accepted' AND started_at IS NULL;
+             UPDATE tasks SET assigned_at = created_at \
+             WHERE status != 'backlog' AND assigned_at IS NULL;",
         )?;
 
         Ok(())
@@ -1003,6 +1054,282 @@ impl Database {
             .query_row([], |row| row.get(0))
             .map_err(LegionError::Database)?;
         Ok(result)
+    }
+
+    // --- Card CRUD (kanban) ---
+
+    /// The full column list for card queries.
+    const CARD_COLUMNS: &'static str = "id, from_repo, to_repo, text, context, priority, status, note, \
+         labels, parent_card_id, source_url, source_type, sort_order, \
+         created_at, updated_at, assigned_at, started_at, completed_at";
+
+    /// SQL fragment for consistent priority ordering across all card queries.
+    const PRIORITY_ORDER: &'static str = "CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 \
+         WHEN 'med' THEN 2 WHEN 'low' THEN 3 END";
+
+    /// Insert a new kanban card and return its UUIDv7 ID.
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_card(
+        &self,
+        from_repo: &str,
+        to_repo: &str,
+        text: &str,
+        context: Option<&str>,
+        priority: &str,
+        labels: Option<&str>,
+        parent_card_id: Option<&str>,
+        source_url: Option<&str>,
+        source_type: Option<&str>,
+    ) -> Result<String> {
+        let id = uuid::Uuid::now_v7().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT INTO tasks (id, from_repo, to_repo, text, context, priority, status, \
+             labels, parent_card_id, source_url, source_type, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7, ?8, ?9, ?10, ?11, ?12)",
+            rusqlite::params![
+                id,
+                from_repo,
+                to_repo,
+                text,
+                context,
+                priority,
+                labels,
+                parent_card_id,
+                source_url,
+                source_type,
+                now,
+                now
+            ],
+        )?;
+        Ok(id)
+    }
+
+    /// Retrieve a single card by ID.
+    pub fn get_card_by_id(&self, id: &str) -> Result<Option<crate::kanban::Card>> {
+        let sql = format!("SELECT {} FROM tasks WHERE id = ?1", Self::CARD_COLUMNS);
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query_map([id], crate::kanban::map_card_row)?;
+        match rows.next() {
+            Some(row) => Ok(Some(row.map_err(LegionError::Database)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// List cards for a repo filtered by direction.
+    pub fn get_cards(
+        &self,
+        repo: &str,
+        direction: crate::kanban::Direction,
+    ) -> Result<Vec<crate::kanban::Card>> {
+        let sql = match direction {
+            crate::kanban::Direction::Inbound => {
+                format!(
+                    "SELECT {} FROM tasks WHERE to_repo = ?1 ORDER BY {}, sort_order ASC, created_at DESC",
+                    Self::CARD_COLUMNS,
+                    Self::PRIORITY_ORDER
+                )
+            }
+            crate::kanban::Direction::Outbound => {
+                format!(
+                    "SELECT {} FROM tasks WHERE from_repo = ?1 ORDER BY created_at DESC",
+                    Self::CARD_COLUMNS
+                )
+            }
+        };
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map([repo], crate::kanban::map_card_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
+    /// Get all cards for the kanban board view.
+    pub fn get_all_cards(&self) -> Result<Vec<crate::kanban::Card>> {
+        let sql = format!(
+            "SELECT {} FROM tasks ORDER BY {}, sort_order ASC, created_at DESC",
+            Self::CARD_COLUMNS,
+            Self::PRIORITY_ORDER
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map([], crate::kanban::map_card_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
+    /// Count pending cards assigned to a repo.
+    pub fn count_pending_cards_for_repo(&self, repo: &str) -> Result<u64> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT COUNT(*) FROM tasks WHERE to_repo = ?1 AND status = 'pending'")?;
+        let count: u64 = stmt
+            .query_row([repo], |row| row.get(0))
+            .map_err(LegionError::Database)?;
+        Ok(count)
+    }
+
+    /// Get pending cards assigned to a repo.
+    pub fn get_pending_cards_for_repo(&self, repo: &str) -> Result<Vec<crate::kanban::Card>> {
+        let sql = format!(
+            "SELECT {} FROM tasks WHERE to_repo = ?1 AND status = 'pending' \
+             ORDER BY {}, sort_order ASC, created_at ASC",
+            Self::CARD_COLUMNS,
+            Self::PRIORITY_ORDER
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map([repo], crate::kanban::map_card_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
+    /// Get active cards for a repo (all non-done/non-cancelled).
+    #[allow(dead_code)]
+    pub fn get_active_cards_for_repo(&self, repo: &str) -> Result<Vec<crate::kanban::Card>> {
+        let sql = format!(
+            "SELECT {} FROM tasks WHERE to_repo = ?1 AND status NOT IN ('done', 'cancelled') \
+             ORDER BY {}, sort_order ASC, created_at DESC",
+            Self::CARD_COLUMNS,
+            Self::PRIORITY_ORDER
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map([repo], crate::kanban::map_card_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
+    /// Atomically pick the next pending card for a repo and accept it.
+    ///
+    /// Selects highest priority, then lowest sort_order, then oldest.
+    /// Transitions to accepted and sets started_at. Returns None if empty.
+    pub fn pick_next_card(&self, repo: &str) -> Result<Option<crate::kanban::Card>> {
+        let sql = format!(
+            "SELECT {} FROM tasks WHERE to_repo = ?1 AND status = 'pending' \
+             ORDER BY {}, sort_order ASC, created_at ASC LIMIT 1",
+            Self::CARD_COLUMNS,
+            Self::PRIORITY_ORDER
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query_map([repo], crate::kanban::map_card_row)?;
+        let card = match rows.next() {
+            Some(row) => row.map_err(LegionError::Database)?,
+            None => return Ok(None),
+        };
+        drop(rows);
+        drop(stmt);
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let rows_affected = self.conn.execute(
+            "UPDATE tasks SET status = 'accepted', started_at = ?1, updated_at = ?2 \
+             WHERE id = ?3 AND status = 'pending'",
+            rusqlite::params![now, now, card.id],
+        )?;
+        if rows_affected == 0 {
+            return Ok(None);
+        }
+
+        self.get_card_by_id(&card.id)
+    }
+
+    /// Peek at the next pending card without accepting it.
+    pub fn peek_next_card(&self, repo: &str) -> Result<Option<crate::kanban::Card>> {
+        let sql = format!(
+            "SELECT {} FROM tasks WHERE to_repo = ?1 AND status = 'pending' \
+             ORDER BY {}, sort_order ASC, created_at ASC LIMIT 1",
+            Self::CARD_COLUMNS,
+            Self::PRIORITY_ORDER
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query_map([repo], crate::kanban::map_card_row)?;
+        match rows.next() {
+            Some(row) => Ok(Some(row.map_err(LegionError::Database)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Update a card's status with timestamp tracking.
+    pub fn update_card_status(
+        &self,
+        id: &str,
+        status: &str,
+        note: Option<&str>,
+        timestamp: CardTimestamp,
+    ) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+
+        let rows = match timestamp {
+            CardTimestamp::Assigned => self.conn.execute(
+                "UPDATE tasks SET status = ?1, note = COALESCE(?2, note), \
+                 assigned_at = ?3, updated_at = ?4 WHERE id = ?5",
+                rusqlite::params![status, note, now, now, id],
+            )?,
+            CardTimestamp::Started => self.conn.execute(
+                "UPDATE tasks SET status = ?1, note = COALESCE(?2, note), \
+                 started_at = ?3, updated_at = ?4 WHERE id = ?5",
+                rusqlite::params![status, note, now, now, id],
+            )?,
+            CardTimestamp::Completed => self.conn.execute(
+                "UPDATE tasks SET status = ?1, note = COALESCE(?2, note), \
+                 completed_at = ?3, updated_at = ?4 WHERE id = ?5",
+                rusqlite::params![status, note, now, now, id],
+            )?,
+            CardTimestamp::None => self.conn.execute(
+                "UPDATE tasks SET status = ?1, note = COALESCE(?2, note), \
+                 updated_at = ?3 WHERE id = ?4",
+                rusqlite::params![status, note, now, id],
+            )?,
+        };
+        if rows == 0 {
+            return Err(LegionError::CardNotFound(id.to_string()));
+        }
+        Ok(())
+    }
+
+    /// Force-move a card to any status (bypasses state machine).
+    pub fn force_move_card(&self, id: &str, status: &str, sort_order: Option<i32>) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let sort = sort_order.unwrap_or(0);
+        // Set the appropriate timestamp based on target status
+        let ts_sql = match status {
+            "done" | "cancelled" => ", completed_at = ?5",
+            "accepted" | "in-review" | "needs-input" => ", started_at = COALESCE(started_at, ?5)",
+            "pending" => ", assigned_at = COALESCE(assigned_at, ?5)",
+            _ => "",
+        };
+        let sql = format!(
+            "UPDATE tasks SET status = ?1, sort_order = ?2, updated_at = ?3{ts_sql} WHERE id = ?4"
+        );
+        let rows = if ts_sql.is_empty() {
+            self.conn
+                .execute(&sql, rusqlite::params![status, sort, now, id])?
+        } else {
+            self.conn
+                .execute(&sql, rusqlite::params![status, sort, now, id, now])?
+        };
+        if rows == 0 {
+            return Err(LegionError::CardNotFound(id.to_string()));
+        }
+        Ok(())
+    }
+
+    /// Get per-agent workload summary.
+    pub fn get_agent_workloads(&self) -> Result<Vec<crate::kanban::AgentWorkload>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT to_repo, \
+             SUM(CASE WHEN status IN ('accepted', 'in-review', 'needs-input') THEN 1 ELSE 0 END) as active, \
+             SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending, \
+             SUM(CASE WHEN status = 'blocked' THEN 1 ELSE 0 END) as blocked \
+             FROM tasks WHERE status NOT IN ('done', 'cancelled') \
+             GROUP BY to_repo ORDER BY to_repo",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(crate::kanban::AgentWorkload {
+                repo: row.get(0)?,
+                active: row.get(1)?,
+                pending: row.get(2)?,
+                blocked: row.get(3)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
     }
 
     // --- Schedule CRUD ---
