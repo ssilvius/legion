@@ -1,0 +1,27 @@
+#!/bin/bash
+# Pre-commit: run /simplify on staged changes via Claude Code.
+# Catches structural issues, dead code, and cleanup before every commit.
+
+DIFF=$(git diff --cached --diff-filter=ACMR)
+if [ -z "$DIFF" ]; then
+  exit 0
+fi
+
+echo "[pre-commit] Running simplify review on staged changes..."
+
+RESULT=$(echo "$DIFF" | claude -p "You are reviewing a diff for code quality. Check for: dead code, unnecessary abstractions, copy-paste patterns, missing error handling, and style violations. If you find issues that MUST be fixed before commit, start your response with BLOCK: and list them. If the code is acceptable, start with PASS: and optionally note minor suggestions. Be concise." 2>/dev/null)
+
+if [ $? -ne 0 ]; then
+  echo "[pre-commit] Claude Code unavailable, skipping review"
+  exit 0
+fi
+
+echo "$RESULT"
+
+if echo "$RESULT" | grep -q "^BLOCK:"; then
+  echo ""
+  echo "[pre-commit] Review found issues. Fix them and re-commit."
+  exit 1
+fi
+
+exit 0

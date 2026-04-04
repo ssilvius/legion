@@ -4,6 +4,8 @@ mod embed;
 mod error;
 mod health;
 mod init;
+#[allow(dead_code)]
+mod kanban;
 mod recall;
 mod reflect;
 mod search;
