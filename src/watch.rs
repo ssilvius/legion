@@ -377,6 +377,64 @@ impl AgentTracker {
 /// Run a single poll cycle across all configured repos.
 ///
 /// Returns the number of agents spawned in this cycle.
+/// Check for blocked cards that might be unblocked by recent announce signals.
+///
+/// When an agent announces completion ("@all announce -- repo completed: ..."),
+/// check if any cards blocked on that repo can be auto-unblocked.
+pub fn check_auto_unblock(db: &Database, signals: &[(String, String, String)]) -> u32 {
+    let mut unblocked = 0u32;
+    for (_id, text, _created) in signals {
+        // Look for announce signals about completed work
+        if !text.contains("announce") || !text.contains("completed:") {
+            continue;
+        }
+
+        // Extract the repo that completed work
+        let completing_repo = text.split("completed:").next().and_then(|prefix| {
+            // Pattern: "@all announce from REPO -- REPO completed:" or "REPO completed:"
+            prefix.split_whitespace().rev().find(|w| {
+                !w.starts_with('@') && !w.starts_with('-') && *w != "announce" && *w != "from"
+            })
+        });
+
+        let Some(source_repo) = completing_repo else {
+            continue;
+        };
+
+        // Find blocked cards whose note mentions the completing repo
+        let blocked_cards = match db.get_all_cards() {
+            Ok(cards) => cards,
+            Err(_) => continue,
+        };
+
+        for card in &blocked_cards {
+            if card.status != crate::kanban::CardStatus::Blocked {
+                continue;
+            }
+            let mentions_source = card
+                .note
+                .as_deref()
+                .map(|n| n.contains(source_repo))
+                .unwrap_or(false);
+            if !mentions_source {
+                continue;
+            }
+
+            // Auto-unblock
+            if crate::kanban::transition_card(db, &card.id, crate::kanban::Action::Unblock, None)
+                .is_ok()
+            {
+                eprintln!(
+                    "[legion watch] auto-unblocked card {} for {} (blocker {} completed)",
+                    card.id, card.to_repo, source_repo
+                );
+                unblocked += 1;
+            }
+        }
+    }
+    unblocked
+}
+
 pub fn poll_cycle(
     db: &Database,
     config: &WatchConfig,
@@ -385,6 +443,13 @@ pub fn poll_cycle(
     since: Option<&str>,
 ) -> Result<u32> {
     let mut spawned: u32 = 0;
+
+    // Check for auto-unblock opportunities from recent signals
+    for repo in &config.repos {
+        if let Ok(signals) = find_pending_signals(db, &repo.name, since) {
+            check_auto_unblock(db, &signals);
+        }
+    }
 
     for repo in &config.repos {
         if cooldown.is_cooling_down(&repo.name) {
