@@ -58,6 +58,11 @@ pub struct WatchConfig {
     #[serde(default = "default_retention_days")]
     pub retention_days: u64,
 
+    /// Whether this node serves the web dashboard.
+    /// Only one node per network should have this set to true.
+    #[serde(default)]
+    pub serve: bool,
+
     #[serde(default)]
     pub repos: Vec<WatchRepoConfig>,
 }
@@ -102,6 +107,7 @@ impl Default for WatchConfig {
             health_poll_secs: default_health_poll_secs(),
             health_window_size: default_health_window_size(),
             retention_days: default_retention_days(),
+            serve: false,
             repos: Vec::new(),
         }
     }
