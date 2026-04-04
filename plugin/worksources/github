@@ -1,0 +1,67 @@
+#!/bin/bash
+# Legion work source plugin: GitHub
+# Protocol: called with subcommand as $1, reads config from env vars.
+#
+# Env vars:
+#   LEGION_WS_REPO    -- GitHub repo in "owner/repo" format
+#   LEGION_WS_WORKDIR -- Local working directory for the repo
+#
+# Subcommands:
+#   list    -- output JSON array of open issues
+#   close N -- close issue number N
+#   detect  -- output the GitHub repo slug if detectable from workdir
+
+set -e
+
+REPO="${LEGION_WS_REPO:-}"
+WORKDIR="${LEGION_WS_WORKDIR:-}"
+
+case "${1:-}" in
+  list)
+    if [ -z "$REPO" ]; then
+      echo "[]"
+      exit 0
+    fi
+    if ! command -v gh &>/dev/null; then
+      echo "[]"
+      exit 0
+    fi
+    gh issue list --repo "$REPO" --state open \
+      --json url,number,title,body,labels,assignees,state \
+      --limit 50 2>/dev/null || echo "[]"
+    ;;
+
+  close)
+    NUMBER="${2:-}"
+    if [ -z "$REPO" ] || [ -z "$NUMBER" ]; then
+      exit 1
+    fi
+    if ! command -v gh &>/dev/null; then
+      exit 1
+    fi
+    gh issue close "$NUMBER" --repo "$REPO" 2>/dev/null
+    ;;
+
+  detect)
+    # Try to detect the GitHub repo from the workdir
+    if [ -n "$WORKDIR" ] && [ -d "$WORKDIR/.git" ]; then
+      cd "$WORKDIR"
+      REMOTE=$(git remote get-url origin 2>/dev/null || true)
+      if [ -n "$REMOTE" ]; then
+        # Extract owner/repo from SSH or HTTPS URL
+        echo "$REMOTE" | sed -E 's|.*[:/]([^/]+/[^/]+)(\.git)?$|\1|'
+        exit 0
+      fi
+    fi
+    # Fallback: try gh repo view
+    if command -v gh &>/dev/null && [ -n "$WORKDIR" ] && [ -d "$WORKDIR" ]; then
+      cd "$WORKDIR"
+      gh repo view --json nameWithOwner -q '.nameWithOwner' 2>/dev/null || true
+    fi
+    ;;
+
+  *)
+    echo "Usage: github <list|close N|detect>" >&2
+    exit 1
+    ;;
+esac
