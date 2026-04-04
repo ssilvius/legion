@@ -10,8 +10,15 @@ use crate::signal;
 ///
 /// Like `reflect_from_text` but sets audience to "team" so the post
 /// appears on the shared bullpen visible to all agents.
+///
+/// Used by unit tests across modules. Production code calls `_with_meta` directly.
 #[allow(dead_code)]
-pub fn post_from_text(db: &Database, index: &SearchIndex, repo: &str, text: &str) -> Result<()> {
+pub fn post_from_text(
+    db: &Database,
+    index: &SearchIndex,
+    repo: &str,
+    text: &str,
+) -> Result<String> {
     post_from_text_with_meta(db, index, repo, text, &ReflectionMeta::default())
 }
 
@@ -22,7 +29,7 @@ pub fn post_from_transcript(
     index: &SearchIndex,
     repo: &str,
     transcript_path: &Path,
-) -> Result<()> {
+) -> Result<String> {
     post_from_transcript_with_meta(db, index, repo, transcript_path, &ReflectionMeta::default())
 }
 
@@ -33,7 +40,7 @@ pub fn post_from_text_with_meta(
     repo: &str,
     text: &str,
     meta: &ReflectionMeta,
-) -> Result<()> {
+) -> Result<String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return Err(LegionError::NoReflectionInput);
@@ -42,9 +49,7 @@ pub fn post_from_text_with_meta(
     let reflection = db.insert_reflection_with_meta(repo, trimmed, "team", meta)?;
     index.add(&reflection.id, repo, trimmed)?;
 
-    eprintln!("posted to bullpen for {} ({})", repo, reflection.id);
-
-    Ok(())
+    Ok(reflection.id)
 }
 
 /// Extract and store a bullpen post from a transcript with Synapse metadata.
@@ -54,7 +59,7 @@ pub fn post_from_transcript_with_meta(
     repo: &str,
     transcript_path: &Path,
     meta: &ReflectionMeta,
-) -> Result<()> {
+) -> Result<String> {
     let content = reflect::extract_last_assistant_message(transcript_path)?;
     post_from_text_with_meta(db, index, repo, &content, meta)
 }

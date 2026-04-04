@@ -42,6 +42,91 @@ fn reflect_and_recall_roundtrip() {
     );
 }
 
+/// Validate that a string looks like a UUIDv7 (36 chars, 4 hyphens).
+fn assert_uuid_format(s: &str) {
+    let trimmed = s.trim();
+    assert!(
+        trimmed.len() == 36 && trimmed.chars().filter(|c| *c == '-').count() == 4,
+        "expected UUIDv7 format, got: {trimmed}"
+    );
+}
+
+#[test]
+fn quiet_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Reflect without --verbose should produce no stderr
+    let out = legion_cmd(dir.path())
+        .args(["reflect", "--repo", "test", "--text", "quiet test"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.is_empty(),
+        "expected no stderr without --verbose, got: {stderr}"
+    );
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    assert_uuid_format(&id);
+
+    // Post without --verbose should also be quiet
+    let out = legion_cmd(dir.path())
+        .args(["post", "--repo", "test", "--text", "quiet post"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.is_empty(),
+        "expected no stderr without --verbose, got: {stderr}"
+    );
+    assert_uuid_format(&String::from_utf8_lossy(&out.stdout));
+}
+
+#[test]
+fn verbose_shows_confirmation() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Reflect with --verbose should produce confirmation on stderr
+    let out = legion_cmd(dir.path())
+        .args([
+            "--verbose",
+            "reflect",
+            "--repo",
+            "test",
+            "--text",
+            "verbose test",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("storing reflection"),
+        "expected verbose confirmation, got: {stderr}"
+    );
+    assert_uuid_format(&String::from_utf8_lossy(&out.stdout));
+
+    // Post with --verbose
+    let out = legion_cmd(dir.path())
+        .args([
+            "--verbose",
+            "post",
+            "--repo",
+            "test",
+            "--text",
+            "verbose post",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("posting"),
+        "expected verbose confirmation, got: {stderr}"
+    );
+}
+
 #[test]
 fn stats_on_empty_db() {
     let dir = tempfile::tempdir().unwrap();
@@ -256,15 +341,9 @@ fn cli_compound_repo_flag() {
         "compound reflect failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("stored reflection for platform"),
-        "expected platform confirmation, got: {stderr}"
-    );
-    assert!(
-        stderr.contains("stored reflection for legion"),
-        "expected legion confirmation, got: {stderr}"
-    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let ids: Vec<&str> = stdout.lines().collect();
+    assert_eq!(ids.len(), 2, "expected 2 IDs on stdout, got: {stdout}");
 
     // Verify both repos have the reflection via recall
     let output = legion_cmd(dir.path())
@@ -309,10 +388,10 @@ fn cli_single_repo_still_works() {
         "single repo reflect failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stderr.contains("stored reflection for platform"),
-        "expected confirmation, got: {stderr}"
+        !stdout.trim().is_empty(),
+        "expected ID on stdout, got nothing"
     );
 }
 
@@ -336,10 +415,10 @@ fn post_and_bullpen_roundtrip() {
         "post failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stderr.contains("posted to bullpen for kelex"),
-        "expected post confirmation, got: {stderr}"
+        !stdout.trim().is_empty(),
+        "expected ID on stdout, got nothing"
     );
 
     // Read the bullpen from a different repo
@@ -490,7 +569,10 @@ fn reindex_rebuilds_from_database() {
     );
 
     // Run reindex
-    let output = legion_cmd(dir.path()).args(["reindex"]).output().unwrap();
+    let output = legion_cmd(dir.path())
+        .args(["--verbose", "reindex"])
+        .output()
+        .unwrap();
     assert!(
         output.status.success(),
         "reindex failed: {}",
@@ -538,7 +620,7 @@ fn consult_no_matches() {
 
     // Consult with a term that will not match
     let output = legion_cmd(dir.path())
-        .args(["consult", "--context", "nonexistent_term_xyz"])
+        .args(["--verbose", "consult", "--context", "nonexistent_term_xyz"])
         .output()
         .unwrap();
     assert!(
@@ -576,10 +658,10 @@ fn reflect_with_metadata_flags() {
         "reflect with meta failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stderr.contains("stored reflection for kelex"),
-        "expected confirmation, got: {stderr}"
+        !stdout.trim().is_empty(),
+        "expected ID on stdout, got nothing"
     );
 }
 
@@ -599,19 +681,11 @@ fn boost_and_chain_roundtrip() {
         .output()
         .unwrap();
     assert!(out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    // Extract the ID from the first line of stderr: "stored reflection for kelex (UUID)"
-    let first_line = stderr.lines().next().unwrap_or("");
-    let id = first_line
-        .rsplit('(')
-        .next()
-        .unwrap()
-        .trim_end_matches(')')
-        .to_string();
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
 
     // Boost the reflection
     let output = legion_cmd(dir.path())
-        .args(["boost", "--id", &id])
+        .args(["--verbose", "boost", "--id", &id])
         .output()
         .unwrap();
     assert!(
@@ -635,10 +709,10 @@ fn boost_and_chain_roundtrip() {
         "chain failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stderr.contains("first insight"),
-        "expected chain output, got: {stderr}"
+        stdout.contains("first insight"),
+        "expected chain output, got: {stdout}"
     );
 }
 
@@ -652,14 +726,7 @@ fn chain_with_follows() {
         .output()
         .unwrap();
     assert!(out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let first_line = stderr.lines().next().unwrap_or("");
-    let parent_id = first_line
-        .rsplit('(')
-        .next()
-        .unwrap()
-        .trim_end_matches(')')
-        .to_string();
+    let parent_id = String::from_utf8_lossy(&out.stdout).trim().to_string();
 
     // Create child reflection with --follows
     let out = legion_cmd(dir.path())
@@ -679,14 +746,7 @@ fn chain_with_follows() {
         "child reflect failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let first_line = stderr.lines().next().unwrap_or("");
-    let child_id = first_line
-        .rsplit('(')
-        .next()
-        .unwrap()
-        .trim_end_matches(')')
-        .to_string();
+    let child_id = String::from_utf8_lossy(&out.stdout).trim().to_string();
 
     // Chain from child should show both
     let output = legion_cmd(dir.path())
@@ -694,14 +754,14 @@ fn chain_with_follows() {
         .output()
         .unwrap();
     assert!(output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stderr.contains("root of the chain"),
-        "expected parent in chain, got: {stderr}"
+        stdout.contains("root of the chain"),
+        "expected parent in chain, got: {stdout}"
     );
     assert!(
-        stderr.contains("builds on root"),
-        "expected child in chain, got: {stderr}"
+        stdout.contains("builds on root"),
+        "expected child in chain, got: {stdout}"
     );
 }
 
@@ -755,10 +815,10 @@ fn post_with_metadata_flags() {
         "post with meta failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stderr.contains("posted to bullpen for rafters"),
-        "expected post confirmation, got: {stderr}"
+        !stdout.trim().is_empty(),
+        "expected ID on stdout, got nothing"
     );
 
     // Verify it shows up on the bullpen
@@ -1007,21 +1067,8 @@ fn task_full_lifecycle() {
         "task create failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("task created: kelex -> legion"),
-        "expected create confirmation, got: {stderr}"
-    );
-    // Extract task ID from output
-    let task_id = stderr
-        .lines()
-        .next()
-        .unwrap_or("")
-        .rsplit('(')
-        .next()
-        .unwrap()
-        .trim_end_matches(')')
-        .to_string();
+    let task_id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    assert!(!task_id.is_empty(), "expected task ID on stdout");
 
     // List inbound tasks for legion
     let out = legion_cmd(dir.path())
@@ -1049,7 +1096,7 @@ fn task_full_lifecycle() {
 
     // Accept the task
     let out = legion_cmd(dir.path())
-        .args(["task", "accept", "--id", &task_id])
+        .args(["--verbose", "task", "accept", "--id", &task_id])
         .output()
         .unwrap();
     assert!(
@@ -1066,6 +1113,7 @@ fn task_full_lifecycle() {
     // Complete the task
     let out = legion_cmd(dir.path())
         .args([
+            "--verbose",
             "task",
             "done",
             "--id",
@@ -1118,16 +1166,7 @@ fn task_block_flow() {
         .output()
         .unwrap();
     assert!(out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let task_id = stderr
-        .lines()
-        .next()
-        .unwrap_or("")
-        .rsplit('(')
-        .next()
-        .unwrap()
-        .trim_end_matches(')')
-        .to_string();
+    let task_id = String::from_utf8_lossy(&out.stdout).trim().to_string();
 
     let out = legion_cmd(dir.path())
         .args(["task", "accept", "--id", &task_id])
@@ -1138,6 +1177,7 @@ fn task_block_flow() {
     // Block the task
     let out = legion_cmd(dir.path())
         .args([
+            "--verbose",
             "task",
             "block",
             "--id",
@@ -1234,16 +1274,7 @@ fn task_invalid_state_transition() {
         .output()
         .unwrap();
     assert!(out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let task_id = stderr
-        .lines()
-        .next()
-        .unwrap_or("")
-        .rsplit('(')
-        .next()
-        .unwrap()
-        .trim_end_matches(')')
-        .to_string();
+    let task_id = String::from_utf8_lossy(&out.stdout).trim().to_string();
 
     // Try to complete a pending task (should fail)
     let out = legion_cmd(dir.path())

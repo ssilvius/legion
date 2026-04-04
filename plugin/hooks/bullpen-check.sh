@@ -17,7 +17,7 @@ if [ -f "/tmp/legion-channel-${REPO}" ]; then
 fi
 
 # Check board for unread posts
-BOARD_COUNT=$(legion -q bullpen --count --repo "$REPO" 2>/dev/null)
+BOARD_COUNT=$(legion bullpen --count --repo "$REPO" 2>/dev/null)
 if [ -n "$BOARD_COUNT" ]; then
   jq -n --arg ctx "[Legion] ${BOARD_COUNT}. Run legion bullpen --repo ${REPO} to read them." '{
     "hookSpecificOutput": {

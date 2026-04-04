@@ -33,7 +33,7 @@ legion task accept --id <task-id>
 legion task done --id <task-id> --note "optional completion note"
 legion task block --id <task-id> --reason "optional reason"
 legion watch                                 # auto-wake sleeping agents on signal arrival
-legion -q <command>                          # suppress stderr noise (used by hooks)
+legion -v <command>                          # show informational messages (quiet by default)
 ```
 
 ### Cross-Agent Consultation

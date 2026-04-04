@@ -54,35 +54,41 @@ pub fn extract_last_assistant_message(transcript_path: &Path) -> Result<String> 
     last_assistant_content.ok_or(LegionError::NoReflectionInput)
 }
 
-/// Store a reflection from direct text input.
+/// Store a reflection from direct text input with default metadata.
 ///
-/// Validates that text is non-empty, inserts into SQLite via
-/// `db.insert_reflection()`, and adds to the Tantivy search index
-/// via `index.add()`. Prints a confirmation message to stdout.
+/// Used by unit tests across modules. Production code calls `_with_meta` directly.
 #[allow(dead_code)]
-pub fn reflect_from_text(db: &Database, index: &SearchIndex, repo: &str, text: &str) -> Result<()> {
+pub fn reflect_from_text(
+    db: &Database,
+    index: &SearchIndex,
+    repo: &str,
+    text: &str,
+) -> Result<String> {
     reflect_from_text_with_meta(db, index, repo, text, &ReflectionMeta::default())
 }
 
-/// Extract and store a reflection from a transcript JSONL file.
+/// Extract and store a reflection from a transcript JSONL file with default metadata.
 #[allow(dead_code)]
 pub fn reflect_from_transcript(
     db: &Database,
     index: &SearchIndex,
     repo: &str,
     transcript_path: &Path,
-) -> Result<()> {
+) -> Result<String> {
     reflect_from_transcript_with_meta(db, index, repo, transcript_path, &ReflectionMeta::default())
 }
 
 /// Store a reflection from text with Synapse metadata.
+///
+/// Returns the stored reflection on success so callers can access the
+/// generated ID.
 pub fn reflect_from_text_with_meta(
     db: &Database,
     index: &SearchIndex,
     repo: &str,
     text: &str,
     meta: &ReflectionMeta,
-) -> Result<()> {
+) -> Result<String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return Err(LegionError::NoReflectionInput);
@@ -91,9 +97,7 @@ pub fn reflect_from_text_with_meta(
     let reflection = db.insert_reflection_with_meta(repo, trimmed, "self", meta)?;
     index.add(&reflection.id, repo, trimmed)?;
 
-    eprintln!("stored reflection for {} ({})", repo, reflection.id);
-
-    Ok(())
+    Ok(reflection.id)
 }
 
 /// Extract and store a reflection from a transcript with Synapse metadata.
@@ -103,7 +107,7 @@ pub fn reflect_from_transcript_with_meta(
     repo: &str,
     transcript_path: &Path,
     meta: &ReflectionMeta,
-) -> Result<()> {
+) -> Result<String> {
     let content = extract_last_assistant_message(transcript_path)?;
     reflect_from_text_with_meta(db, index, repo, &content, meta)
 }

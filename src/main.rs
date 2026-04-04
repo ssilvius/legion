@@ -23,12 +23,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use clap::{Parser, Subcommand};
 use directories::ProjectDirs;
 
-static QUIET: AtomicBool = AtomicBool::new(false);
+static VERBOSE: AtomicBool = AtomicBool::new(false);
 
-/// Print an informational message to stderr, unless --quiet is set.
+/// Print an informational message to stderr, only when --verbose is set.
 macro_rules! info {
     ($($arg:tt)*) => {
-        if !QUIET.load(Ordering::Relaxed) {
+        if VERBOSE.load(Ordering::Relaxed) {
             eprintln!($($arg)*);
         }
     };
@@ -40,9 +40,9 @@ macro_rules! info {
     about = "Agent specialization through deliberate practice"
 )]
 struct Cli {
-    /// Suppress informational messages on stderr (useful in hooks)
+    /// Show informational messages on stderr (quiet by default)
     #[arg(long, short, global = true)]
-    quiet: bool,
+    verbose: bool,
 
     #[command(subcommand)]
     command: Commands,
@@ -437,6 +437,9 @@ fn data_dir() -> error::Result<PathBuf> {
 }
 
 /// Run a compound command (text or transcript) across multiple repos with metadata.
+///
+/// Prints each stored ID to stdout (one per repo) so callers and scripts
+/// can capture them. Returns an error if any repo fails.
 #[allow(clippy::too_many_arguments)]
 fn run_compound_command_with_meta(
     db: &db::Database,
@@ -451,14 +454,14 @@ fn run_compound_command_with_meta(
         &str,
         &str,
         &db::ReflectionMeta,
-    ) -> error::Result<()>,
+    ) -> error::Result<String>,
     from_transcript: fn(
         &db::Database,
         &search::SearchIndex,
         &str,
         &std::path::Path,
         &db::ReflectionMeta,
-    ) -> error::Result<()>,
+    ) -> error::Result<String>,
     label: &str,
 ) -> error::Result<()> {
     if text.is_none() && transcript.is_none() {
@@ -473,9 +476,15 @@ fn run_compound_command_with_meta(
             (Some(_), Some(_)) => return Err(error::LegionError::NoReflectionInput),
             (None, None) => unreachable!("guarded by early return above"),
         };
-        if let Err(e) = result {
-            eprintln!("[legion] error {label} for {r}: {e}");
-            had_error = true;
+        match result {
+            Ok(id) => {
+                info!("[legion] {label} for {r} ({id})");
+                println!("{id}");
+            }
+            Err(e) => {
+                eprintln!("[legion] error {label} for {r}: {e}");
+                had_error = true;
+            }
         }
     }
     if had_error {
@@ -491,7 +500,7 @@ fn try_load_embed_model() -> Option<embed::EmbedModel> {
     match embed::EmbedModel::load() {
         Ok(model) => Some(model),
         Err(e) => {
-            info!("[legion] embedding model unavailable, falling back to BM25: {e}");
+            eprintln!("[legion] embedding model unavailable, falling back to BM25: {e}");
             None
         }
     }
@@ -511,7 +520,7 @@ fn backfill_embeddings(db: &db::Database, model: &embed::EmbedModel) -> error::R
                 }
             }
             Err(e) => {
-                info!("[legion] warning: failed to embed {}: {}", id, e);
+                eprintln!("[legion] warning: failed to embed {}: {}", id, e);
             }
         }
     }
@@ -519,9 +528,22 @@ fn backfill_embeddings(db: &db::Database, model: &embed::EmbedModel) -> error::R
     Ok(count)
 }
 
+/// Raise the soft file-descriptor limit to the hard limit.
+///
+/// macOS ships a low soft limit (often 2560) which Tantivy can exhaust
+/// when opening index segments. The hard limit is much higher (or unlimited).
+/// This is a no-op on failure -- the worst case is the original limit.
+fn raise_fd_limit() {
+    match rlimit::increase_nofile_limit(u64::MAX) {
+        Ok(_) => {}
+        Err(e) => eprintln!("[legion] warning: could not raise fd limit: {e}"),
+    }
+}
+
 fn main() -> error::Result<()> {
+    raise_fd_limit();
     let cli = Cli::parse();
-    QUIET.store(cli.quiet, Ordering::Relaxed);
+    VERBOSE.store(cli.verbose, Ordering::Relaxed);
 
     match cli.command {
         Commands::Reflect {
@@ -686,9 +708,17 @@ fn main() -> error::Result<()> {
                 parent_id: follows,
             };
 
-            for r in &repo {
-                board::post_from_text_with_meta(&database, &index, r, &text, &meta)?;
-            }
+            run_compound_command_with_meta(
+                &database,
+                &index,
+                &repo,
+                &Some(text),
+                &None,
+                &meta,
+                board::post_from_text_with_meta,
+                board::post_from_transcript_with_meta,
+                "sending signal",
+            )?;
 
             // Compute embeddings for new signals
             if let Some(model) = try_load_embed_model() {
@@ -705,7 +735,7 @@ fn main() -> error::Result<()> {
             if database.boost_reflection(&id)? {
                 info!("[legion] boosted reflection {}", id);
             } else {
-                info!("[legion] reflection not found: {}", id);
+                eprintln!("[legion] reflection not found: {}", id);
             }
         }
         Commands::Chain { id } => {
@@ -730,7 +760,7 @@ fn main() -> error::Result<()> {
                         .unwrap_or_default();
                     let truncated: String = r.text.chars().take(80).collect();
                     let ellipsis = if r.text.len() > 80 { "..." } else { "" };
-                    info!(
+                    println!(
                         "{}{} {}{}: {}{}",
                         prefix, r.repo, date, domain_tag, truncated, ellipsis
                     );
@@ -845,7 +875,7 @@ fn main() -> error::Result<()> {
                 &db::ReflectionMeta::default(),
             )?;
             if let Err(e) = index.add(&reflection.id, &reflection.repo, &announcement) {
-                info!("[legion] search index add failed: {e}");
+                eprintln!("[legion] search index add failed: {e}");
             }
             info!("[legion] done: {text}");
 
@@ -861,7 +891,7 @@ fn main() -> error::Result<()> {
                     &db::ReflectionMeta::default(),
                 )?;
                 if let Err(e) = index.add(&notify_ref.id, &notify_ref.repo, &notify_text) {
-                    info!("[legion] search index add failed: {e}");
+                    eprintln!("[legion] search index add failed: {e}");
                 }
                 info!("[legion] notified {agent} (was blocked on {repo})");
             }
@@ -890,7 +920,8 @@ fn main() -> error::Result<()> {
                         context.as_deref(),
                         &priority,
                     )?;
-                    info!("[legion] task created: {} -> {} ({})", from, to, id);
+                    println!("{id}");
+                    info!("[legion] task created: {} -> {}", from, to);
                 }
                 TaskAction::List { repo, from } => {
                     let direction = if from {
@@ -945,7 +976,8 @@ fn main() -> error::Result<()> {
                         active_start.as_deref(),
                         active_end.as_deref(),
                     )?;
-                    info!("[legion] schedule created: {} ({})", name, id);
+                    println!("{id}");
+                    info!("[legion] schedule created: {}", name);
                 }
                 ScheduleAction::List => {
                     let schedules = database.list_schedules()?;
@@ -980,21 +1012,21 @@ fn main() -> error::Result<()> {
                     if database.toggle_schedule(&id, true)? {
                         info!("[legion] schedule enabled: {}", id);
                     } else {
-                        info!("[legion] schedule not found: {}", id);
+                        eprintln!("[legion] schedule not found: {}", id);
                     }
                 }
                 ScheduleAction::Disable { id } => {
                     if database.toggle_schedule(&id, false)? {
                         info!("[legion] schedule disabled: {}", id);
                     } else {
-                        info!("[legion] schedule not found: {}", id);
+                        eprintln!("[legion] schedule not found: {}", id);
                     }
                 }
                 ScheduleAction::Delete { id } => {
                     if database.delete_schedule(&id)? {
                         info!("[legion] schedule deleted: {}", id);
                     } else {
-                        info!("[legion] schedule not found: {}", id);
+                        eprintln!("[legion] schedule not found: {}", id);
                     }
                 }
             }
@@ -1016,7 +1048,7 @@ fn main() -> error::Result<()> {
                 let minutes: i64 = parse_duration_minutes(&duration_str)?;
                 let since = (chrono::Utc::now() - chrono::Duration::minutes(minutes)).to_rfc3339();
                 let hostname = sysinfo::System::host_name().unwrap_or_else(|| {
-                    info!("[legion] warning: could not determine hostname, using 'unknown'");
+                    eprintln!("[legion] warning: could not determine hostname, using 'unknown'");
                     "unknown".to_string()
                 });
 
@@ -1032,7 +1064,7 @@ fn main() -> error::Result<()> {
                         serde_json::to_string_pretty(&samples).map_err(error::LegionError::Json)?
                     );
                 } else if samples.is_empty() {
-                    info!("[legion] no health samples found (is watch running?)");
+                    eprintln!("[legion] no health samples found (is watch running?)");
                 } else {
                     print_health_history(&samples);
                 }
@@ -1047,7 +1079,7 @@ fn main() -> error::Result<()> {
                         serde_json::to_string_pretty(&samples).map_err(error::LegionError::Json)?
                     );
                 } else if samples.is_empty() {
-                    info!("[legion] no health samples found (is watch running?)");
+                    eprintln!("[legion] no health samples found (is watch running?)");
                 } else {
                     print_health_all_hosts(&samples);
                 }
