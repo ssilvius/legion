@@ -55,6 +55,12 @@ append "$(legion surface --repo "$REPO" 2>/dev/null)"
 # Agent work status (your tasks, team needs, what changed)
 append "$(legion status --repo "$REPO" 2>/dev/null)"
 
+# Next kanban card (peek only -- don't auto-accept at session start)
+NEXT_CARD=$(legion work --repo "$REPO" --peek 2>/dev/null)
+if [ -n "$NEXT_CARD" ]; then
+  append "$NEXT_CARD"
+fi
+
 if [ -n "$OUTPUT" ]; then
   OUTPUT="${OUTPUT}"$'\n\n'"${LEGION_HELP}"
   jq -n --arg ctx "$OUTPUT" '{
