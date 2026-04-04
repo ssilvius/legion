@@ -846,6 +846,10 @@ fn main() -> error::Result<()> {
                 })
                 .unwrap_or_default();
 
+            if let Some(ref n) = note {
+                signal::validate_note(n)?;
+            }
+
             let text = signal::format_signal(
                 &to,
                 &verb,
