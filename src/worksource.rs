@@ -257,7 +257,7 @@ mod tests {
     #[test]
     fn extract_issue_number_from_url() {
         assert_eq!(
-            extract_issue_number("https://github.com/ssilvius/legion/issues/42"),
+            extract_issue_number("https://github.com/runlegion/legion/issues/42"),
             Some(42)
         );
         assert_eq!(extract_issue_number("not-a-url"), None);
